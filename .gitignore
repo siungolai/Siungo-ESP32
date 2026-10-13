@@ -1,0 +1,11 @@
+# PlatformIO 构建产物
+.pio/
+
+# Arduino IDE 临时文件
+*.tmp
+
+# 本地凭据（WiFi 密码等），绝不进仓库
+src/secrets.h
+
+# WorkBuddy 项目记忆，不进公开仓库
+/.workbuddy/
