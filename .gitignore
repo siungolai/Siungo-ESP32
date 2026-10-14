@@ -1,11 +1,27 @@
 # PlatformIO 构建产物
+# .pio/ 只匹配根下那一层，子项目的 <项目>/.pio/ 要靠第二条（否则每个子项目
+# 的构建缓存都会被 git add -A 吞进来）
 .pio/
+**/.pio/
+
+# PlatformIO Core 的包缓存/平台 SDK（体积 GB 级，可重新下载）
+/.pio-core/
 
 # Arduino IDE 临时文件
 *.tmp
 
+# Python 字节码缓存（tools/ 下的 .py 跑一次就会生成）
+__pycache__/
+*.pyc
+
 # 本地凭据（WiFi 密码等），绝不进仓库
-src/secrets.h
+# 注意必须写 **/ 前缀：没有前缀的 "src/secrets.h" 会被 git 锚定到仓库根，
+# 只能匹配 <根>/src/secrets.h，而实际文件都在 <子项目>/src/secrets.h，
+# 等于一条都没忽略掉。各子项目只留 secrets.h.example 模板。
+**/src/secrets.h
 
 # WorkBuddy 项目记忆，不进公开仓库
 /.workbuddy/
+
+# 数据手册原文与提取中间产物（PDF + 文本层 + 一次性脚本），体积大且可重新下载
+/.tmp-research/
