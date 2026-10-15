@@ -1,0 +1,121 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# pre-commit 钩子（L1：快速检查，目标总耗时 < 0.5 秒）
+#
+# 由 `git config core.hooksPath .githooks` 启用，见仓库根 README 或
+# docs/ 说明。安装后每次 git commit 自动运行（含 --amend）。
+#
+# 检查两项：
+#   1. 敏感信息扫描——真实 MAC 地址、secrets.h、疑似明文凭据
+#   2. status-oled 版式自检——仅当本次提交触及该项目时才跑
+#
+# 跳过方式（必须显式声明，不提供静默绕过）：
+#   SKIP_HOOKS=1 git commit -m "..."
+#
+# 注意：本仓库不使用 `git commit --no-verify`，该选项会绕过全部检查。
+# ---------------------------------------------------------------------------
+
+set -u
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT" || exit 1
+
+# ------------------------------------------------------------------ 跳过开关
+if [ "${SKIP_HOOKS:-}" = "1" ]; then
+  echo "pre-commit: SKIP_HOOKS=1，跳过全部检查"
+  exit 0
+fi
+
+# 本次提交涉及的文件（含 --amend 时的暂存区内容）
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+FAILED=0
+RED=''
+YEL=''
+OFF=''
+if [ -t 1 ]; then
+  RED='\033[31m'; YEL='\033[33m'; OFF='\033[0m'
+fi
+
+# ============================================================ 检查 1：敏感信息
+# 只扫暂存区的「内容」，不是工作区文件——避免被本地未提交的草稿误伤。
+# 二进制文件由 git diff 自动跳过（用 -a 强制按文本处理反而会误报）。
+echo "pre-commit: [1/2] 敏感信息扫描"
+
+# 1a. 真实 MAC 地址。本仓库所有文档中的 MAC 必须是虚构示例
+#     （约定值见 HARDWARE.md 与 status-oled/README.md）。
+#     真实值的特征是 ISP 前缀，这里拦截已知的真实前缀。
+MAC_HITS=$(git diff --cached -U0 | grep -E '^\+' \
+  | grep -oiE '([0-9A-F]{2}:){5}[0-9A-F]{2}' | sort -u)
+
+if [ -n "$MAC_HITS" ]; then
+  # 白名单：虚构示例与常见文档占位写法
+  BAD=$(echo "$MAC_HITS" | grep -viE '^(12:34:56:78:9A:BC|AA:BB:CC:DD:EE:FF|00:00:00:00:00:00|FF:FF:FF:FF:FF:FF)$')
+  if [ -n "$BAD" ]; then
+    echo "${RED}  ✗ 检测到疑似真实 MAC 地址：${OFF}"
+    echo "$BAD" | sed 's/^/      /'
+    echo "      本仓库要求文档中的 MAC 一律用虚构示例 12:34:56:78:9A:BC"
+    FAILED=1
+  else
+    echo "  ✓ MAC 检查通过（仅虚构示例）"
+  fi
+else
+  echo "  ✓ MAC 检查通过（无 MAC 字面量）"
+fi
+
+# 1b. secrets.h 绝不能进仓库（.gitignore 已挡，这里是第二道防线）
+SECRETS=$(echo "$STAGED" | grep -E '(^|/)secrets\.h$' || true)
+if [ -n "$SECRETS" ]; then
+  echo "${RED}  ✗ 检测到 secrets.h 进入暂存区：${OFF}"
+  echo "$SECRETS" | sed 's/^/      /'
+  echo "      凭据文件绝不进仓库，只保留 secrets.h.example 模板"
+  FAILED=1
+else
+  echo "  ✓ secrets.h 检查通过"
+fi
+
+# 1c. 常见凭据字面量。注意排除 .example / 文档中的占位写法。
+CRED=$(git diff --cached -U0 -- . ':(exclude)*.example' ':(exclude)*.md' \
+  | grep -E '^\+' | grep -inE \
+  '(password|passwd|api_?key|token|secret)\s*[:=]\s*["'\''][^"'\'' ]{8,}' | head -5 || true)
+if [ -n "$CRED" ]; then
+  echo "${YEL}  ⚠ 疑似硬编码凭据（请人工确认）：${OFF}"
+  echo "$CRED" | sed 's/^/      /'
+  # 仅警告，不阻断——避免在文档/示例里误伤导致绕过钩子
+fi
+
+# ====================================================== 检查 2：status-oled 版式
+# 只在本次提交触及 status-oled/ 时运行。脚本 0.12 秒，纯 Python 无依赖。
+if echo "$STAGED" | grep -q '^status-oled/'; then
+  echo "pre-commit: [2/2] status-oled 版式自检"
+
+  if ! command -v python >/dev/null 2>&1; then
+    echo "${YEL}  ⚠ 找不到 python，跳过版式自检${OFF}"
+  elif [ ! -f "status-oled/tools/check_layout.py" ]; then
+    echo "${YEL}  ⚠ 找不到 status-oled/tools/check_layout.py，跳过${OFF}"
+  else
+    if python "status-oled/tools/check_layout.py" >/dev/null 2>&1; then
+      echo "  ✓ 版式自检通过（21 列上限 / 右对齐 / 框图一致 / 水印 / 版本号）"
+    else
+      echo "${RED}  ✗ 版式自检失败${OFF}"
+      echo "      运行以下命令查看详情："
+      echo "        python status-oled/tools/check_layout.py"
+      FAILED=1
+    fi
+  fi
+else
+  echo "pre-commit: [2/2] 未触及 status-oled/，跳过版式自检"
+fi
+
+# ------------------------------------------------------------------ 结论
+if [ "$FAILED" -ne 0 ]; then
+  echo ""
+  echo "${RED}pre-commit 检查未通过，提交已中止。${OFF}"
+  echo "修复后重新提交。确需跳过：SKIP_HOOKS=1 git commit ..."
+  exit 1
+fi
+
+exit 0

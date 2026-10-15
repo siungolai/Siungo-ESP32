@@ -38,3 +38,7 @@ __pycache__/
 # 注意必须写全路径前缀：这条规则只覆盖 status-oled 一个项目，
 # pet-oled3/docs/ 与 status-oled3/docs/ 是已入库的项目文档，不受影响。
 /status-oled/docs/
+
+# pre-push 编译钩子的临时目录（pio 必须能写 TEMP；指到仓库内可写位置，
+# 构建日志写在 <仓库>/.tmp-pio/build.log，不进版本控制）
+/.tmp-pio/

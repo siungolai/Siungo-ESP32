@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# .editorconfig —— 跨编辑器的基础格式约定
+#
+# 作用范围：支持 EditorConfig 的编辑器会自动读取（VS Code / Vim / JetBrains /
+# Sublime / 部分 Emacs 配置）。不支持的需要装插件，装不了也不影响构建。
+#
+# 原则：只约束「会造成真实 diff 噪音」的东西。缩进宽度这类纯审美项，
+# 跟随各项目现有风格，不在这里强推统一个值。
+#
+# 与 .gitattributes 的分工：
+#   .editorconfig 管「你保存文件时编辑器写什么」
+#   .gitattributes 管「git 入库时存什么」
+#   两者都必须把行尾定为 LF，才能保证任何人保存都不会引入 CRLF。
+# ---------------------------------------------------------------------------
+
+root = true
+
+# ------------------------------------------------------------------ 默认
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+# 去掉行尾空格。注意：Markdown 里「行尾两个空格」是硬换行语法，
+# 所以下面单独给 *.md 关掉这一项。
+trim_trailing_whitespace = true
+
+# ------------------------------------------------------------------ 缩进
+# 本仓库现有风格：C/C++ 用 4 空格（见各项目 src/*.cpp 的真实缩进），
+# Python 用 4 空格，配置文件用 2 空格。跟随现状而非另立标准。
+[*.{c,cpp,h,hpp}]
+indent_style = space
+indent_size = 4
+
+[*.ino]
+indent_style = space
+indent_size = 2
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{ini,cfg,conf,yml,yaml,json,editorconfig}]
+indent_style = space
+indent_size = 2
+
+# ------------------------------------------------------------------ Markdown
+[*.md]
+# 行尾两个空格 = 硬换行，不能被 trim 掉
+trim_trailing_whitespace = false
+
+# ------------------------------------------------------------------ 例外
+# 这些文件的内容对空白敏感，任何自动格式化都会破坏它们。
+[{Makefile,makefile,*.mk}]
+indent_style = tab
+trim_trailing_whitespace = false
+
+# 补丁/diff 文件保留逐字节的原始空白
+[*.{patch,diff}]
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+# ------------------------------------------------------------------ 构建产物
+# .pio/ 与 .tmp-pio/ 是构建目录，不进版本控制，但编辑器仍可能打开它们，
+# 显式声明避免在这些文件上触发格式化提示。
+[{.pio,.tmp-pio,.pio-core}/**]
+insert_final_newline = false

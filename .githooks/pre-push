@@ -1,0 +1,207 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# pre-push 钩子（L2：慢检查，编译本次推送涉及的项目）
+#
+# 为什么编译放这里而不是 pre-commit：
+#   一次 `pio run` 增量约 10 秒/项目，全量更久。放进 pre-commit 会让每次
+#   提交都卡十秒，最终必然有人用 --no-verify 绕过——那样连 L1 的快速检查
+#   都一起丢了。推送本身就是审阅门里显式确认的动作，慢一点可以接受。
+#
+# 入参（git 传进来的，不是用户传的）：
+#   $1 = remote 名（如 origin）
+#   $2 = remote URL
+#   之后每行 = <local ref> <local sha> <remote ref> <remote sha>
+#   remote sha 全 0 表示「远端还没有这个分支」（首次推送）
+#
+# 跳过方式：
+#   SKIP_HOOKS=1 git push
+#   SKIP_BUILD=1 git push      # 只跳过编译，敏感信息扫描仍然跑
+#
+# 注意：本仓库不使用 `git push --no-verify`，该选项会绕过全部检查。
+# ---------------------------------------------------------------------------
+
+set -u
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT" || exit 1
+
+RED=''
+YEL=''
+GRN=''
+OFF=''
+if [ -t 1 ]; then
+  RED='\033[31m'; YEL='\033[33m'; GRN='\033[32m'; OFF='\033[0m'
+fi
+
+# ------------------------------------------------------------------ 跳过开关
+if [ "${SKIP_HOOKS:-}" = "1" ]; then
+  echo "pre-push: SKIP_HOOKS=1，跳过全部检查"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ 解析范围
+# 找出本次推送实际新增的提交范围。可能有多个 ref 一起推。
+ZERO='0000000000000000000000000000000000000000'
+RANGES=''
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # 删除分支的推送（local sha 全 0）没有内容要检查
+  if [ "$local_sha" = "$ZERO" ]; then
+    continue
+  fi
+  if [ "$remote_sha" = "$ZERO" ]; then
+    # 远端还没有这个分支：找出本分支相对于「所有远端分支」的新提交。
+    _base=$(git rev-list "$local_sha" --not --remotes 2>/dev/null | tail -1)
+    if [ -n "$_base" ]; then
+      RANGES="$RANGES ${_base}^..${local_sha}"
+    else
+      # 远端完全没有可比较的历史，退回只查最后一次提交
+      RANGES="$RANGES ${local_sha}^..${local_sha}"
+    fi
+  else
+    RANGES="$RANGES ${remote_sha}..${local_sha}"
+  fi
+done
+
+if [ -z "$RANGES" ]; then
+  echo "pre-push: 没有需要检查的新提交"
+  exit 0
+fi
+
+# 把 40 位完整 sha 缩短成 8 位。git 钩子传进来的是完整 sha，但完整 sha 在
+# 仓库历史里未必能解析；关键是「解析失败必须被发现」，不能静默返回空 diff
+# 让检查假装通过。这里逐个缩短，解析不了就保留原值，下游 git diff 会报错。
+#
+# 注意 sh 的 word splitting：$RANGES 里是空格分隔的多个 `A..B`，
+# 每个都要拆成 A 和 B 两半再分别缩短。
+RANGE_SPEC=''
+for _r in $RANGES; do
+  _a=${_r%%..*}
+  _b=${_r##*..}
+  [ -z "$_a" ] && continue
+  [ -z "$_b" ] && continue
+  _a=$(git rev-parse --short=8 "$_a" 2>/dev/null || echo "$_a")
+  _b=$(git rev-parse --short=8 "$_b" 2>/dev/null || echo "$_b")
+  RANGE_SPEC="$RANGE_SPEC ${_a}..${_b}"
+done
+RANGE_SPEC=$(echo "$RANGE_SPEC" | sed 's/^ *//')
+
+# 范围解析失败的兜底：退化成「只检查最后一次提交」，宁可少查也不能假装查过。
+if [ -z "$RANGE_SPEC" ]; then
+  echo "pre-push: 无法解析检查范围，退回只检查 HEAD"
+  RANGE_SPEC="HEAD^..HEAD"
+fi
+
+# 自检：范围必须能解析出至少一个提交，否则说明解析出了问题，
+# 此时绝不能继续（否则会静默放行本该拦住的内容）。
+if ! git rev-parse --verify -q "$(echo "$RANGE_SPEC" | awk '{print $NF}' | sed 's/.*\.\.//')" >/dev/null 2>&1; then
+  echo "pre-push: 警告——检查范围无法解析出提交，退回只检查 HEAD"
+  RANGE_SPEC="HEAD^..HEAD"
+fi
+
+echo "pre-push: 检查范围 $RANGE_SPEC"
+
+FAILED=0
+
+# ==================================== 检查 1：本次推送新增内容里的敏感信息
+# 复用 checks.sh，避免与 pre-commit 两处维护同一套规则导致漂移。
+echo "pre-push: [1/2] 敏感信息扫描"
+if [ -f "status-oled/tools/checks.sh" ]; then
+  sh status-oled/tools/checks.sh mac "$RANGE_SPEC" || FAILED=1
+  sh status-oled/tools/checks.sh creds "$RANGE_SPEC" || true
+else
+  echo "  ${YEL}⚠${OFF} 找不到 status-oled/tools/checks.sh，退回内置扫描"
+  HITS=$(git diff --unified=0 $RANGE_SPEC 2>/dev/null | grep -E '^\+' \
+    | grep -oiE '([0-9A-F]{2}:){5}[0-9A-F]{2}' | sort -u \
+    | grep -viE '^(12:34:56:78:9A:BC|AA:BB:CC:DD:EE:FF|00:00:00:00:00:00|FF:FF:FF:FF:FF:FF)$' || true)
+  if [ -n "$HITS" ]; then
+    echo "  ${RED}✗${OFF} 检测到疑似真实 MAC 地址："
+    echo "$HITS" | sed 's/^/      /'
+    FAILED=1
+  else
+    echo "  ${GRN}✓${OFF} MAC 检查通过"
+  fi
+fi
+
+# ==================================== 检查 2：编译本次推送触及的项目
+# 只编译「改了源码或 platformio.ini」的项目——文档提交不触发编译，省时间。
+echo "pre-push: [2/2] 编译本次推送涉及的项目"
+
+if [ "${SKIP_BUILD:-}" = "1" ]; then
+  echo "  ${YEL}⚠${OFF} SKIP_BUILD=1，跳过编译"
+  exit "$FAILED"
+fi
+
+if ! command -v pio >/dev/null 2>&1; then
+  echo "  ${YEL}⚠${OFF} 找不到 pio，跳过编译检查"
+  exit "$FAILED"
+fi
+
+# 从提交范围里提取被改动的文件，映射出受影响的 PlatformIO 项目目录。
+CHANGED=$(git diff --name-only $RANGE_SPEC 2>/dev/null || true)
+if [ -z "$CHANGED" ]; then
+  echo "  没有文件改动，跳过编译"
+  exit "$FAILED"
+fi
+
+# 项目 = 含 platformio.ini 的目录，且不能是 .pio / .pio-core / .pio-probe 这类
+# 第三方缓存目录（它们内部有大量示例 platformio.ini，编译它们纯浪费）。
+PROJECTS=''
+for f in $CHANGED; do
+  d=$(dirname "$f")
+  while [ "$d" != "." ] && [ "$d" != "/" ]; do
+    case "$d" in
+      .pio*|*/.pio*|.tmp*) ;; # 缓存/临时目录，跳过
+      *)
+        if [ -f "$d/platformio.ini" ]; then
+          case " $PROJECTS " in
+            *" $d "*) ;;
+            *) PROJECTS="$PROJECTS $d" ;;
+          esac
+          break
+        fi
+        ;;
+    esac
+    d=$(dirname "$d")
+  done
+done
+
+PROJECTS=$(echo "$PROJECTS" | sed 's/^ *//')
+if [ -z "$PROJECTS" ]; then
+  echo "  本次推送未触及任何 PlatformIO 项目，跳过编译"
+  exit "$FAILED"
+fi
+
+echo "  待编译项目：$PROJECTS"
+
+# pio 需要一个可写的临时目录。本机默认 TEMP 可用，但为稳妥指向仓库内。
+# （目录已在 .gitignore 里，不进版本控制）
+PIO_TMP="$REPO_ROOT/.tmp-pio"
+mkdir -p "$PIO_TMP" 2>/dev/null || true
+
+for proj in $PROJECTS; do
+  echo ""
+  echo "  --- 编译 $proj ---"
+  if TMP="$PIO_TMP" TEMP="$PIO_TMP" pio run --project-dir "$proj" >"$PIO_TMP/build.log" 2>&1; then
+    SIZE=$(grep -E '^(RAM|Flash):' "$PIO_TMP/build.log" | tr '\n' ' ')
+    echo "  ${GRN}✓${OFF} $proj 编译通过"
+    [ -n "$SIZE" ] && echo "      $SIZE"
+  else
+    echo "  ${RED}✗${OFF} $proj 编译失败"
+    echo "      完整日志：$PIO_TMP/build.log"
+    echo "      末尾 20 行："
+    tail -20 "$PIO_TMP/build.log" | sed 's/^/        /'
+    FAILED=1
+  fi
+done
+
+# ------------------------------------------------------------------ 结论
+if [ "$FAILED" -ne 0 ]; then
+  echo ""
+  echo "${RED}pre-push 检查未通过，推送已中止。${OFF}"
+  echo "修复后重新推送。确需跳过：SKIP_HOOKS=1 git push 或 SKIP_BUILD=1 git push"
+  exit 1
+fi
+
+echo ""
+echo "${GRN}pre-push 检查通过，继续推送。${OFF}"
+exit 0
