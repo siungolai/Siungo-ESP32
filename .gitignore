@@ -6,6 +6,10 @@
 
 # PlatformIO Core 的包缓存/平台 SDK（体积 GB 级，可重新下载）
 /.pio-core/
+# 同上，另一处 PlatformIO Core 工作目录（toolchain + framework + 下载缓存，
+# 单目录 376 MB）。.pio/ 与 /.pio-core/ 两条规则都不匹配它，
+# 会被 git add -A 整个吞进来
+/.pio-probe/
 
 # Arduino IDE 临时文件
 *.tmp
@@ -19,6 +23,9 @@ __pycache__/
 # 只能匹配 <根>/src/secrets.h，而实际文件都在 <子项目>/src/secrets.h，
 # 等于一条都没忽略掉。各子项目只留 secrets.h.example 模板。
 **/src/secrets.h
+
+# 提交审阅报告等过程产物（含仓库路径与提交草稿），不是项目文档
+/.doc/
 
 # WorkBuddy 项目记忆，不进公开仓库
 /.workbuddy/

@@ -7,6 +7,7 @@
  */
 #include "ssd1306_i2c.h"
 
+#include <Arduino.h>
 #include <Wire.h>
 
 #include "font5x7.h"

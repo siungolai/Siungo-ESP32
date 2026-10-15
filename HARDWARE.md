@@ -819,6 +819,8 @@ DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#5
 - 1602 项目（含 5V 电平转换专章）：[`lcd1602-uptime/README.md`](lcd1602-uptime/README.md)
 - 板载 WS2812 引脚判定：[`pin-probe/README.md`](pin-probe/README.md)
 - 养成游戏策划案（三屏 + PCA9548A 方案）：[`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md)
+- 桌面状态显示器（三屏 + 按钮 + 蜂鸣器，策划中）：[`status-oled3/README.md`](status-oled3/README.md)
+- 状态显示器的决策记录（三屏分工、聚合端点、引脚分配等）：[`status-oled3/docs/adr/`](status-oled3/docs/adr/)
 - 关键决策记录（PCA9548A 选型、单通道轮询、开机时间推进等）：[`pet-oled3/docs/adr/`](pet-oled3/docs/adr/)
 - 术语表（统一命名）：[`pet-oled3/CONTEXT.md`](pet-oled3/CONTEXT.md)
 - 仓库总览：[`README.md`](README.md)
