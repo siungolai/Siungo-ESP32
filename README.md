@@ -13,7 +13,7 @@
 | [clock-oled](clock-oled/) | **联网时钟**：NTP 对时后显示时间与日期，每 1s 刷新，大号 HH:MM + 日期星期。每小时自动重新对时压漂移。OLED SCL→GPIO4 / SDA→GPIO5；**需先建 `src/secrets.h` 填 WiFi** | ESP32-S3-DevKitC-1 N16R8 |
 | [pet-oled3](pet-oled3/) | **养成类掌上宠物**（策划阶段，尚未动工）：三块 SSD1306 分饰角色/数值/日志，经 **PCA9548A** 解决同址冲突，4x4 键盘出三个主动作，旋转编码器调参，蜂鸣器出音效 | ESP32-S3-DevKitC-1 N16R8 |
 
-硬件与工具链参数（含实测数据）见 **[HARDWARE.md](HARDWARE.md)** —— 配件清单。
+硬件与工具链参数（含实测数据）见 **[HARDWARE.md](HARDWARE.md)** —— 器件规格、接线、驱动接口与踩坑记录。
 
 `blink3` 的外接三灯模式与 `pin-probe`、`uptime-oled` 只用标准 Arduino API；`blink3` 的板载模式用 Adafruit NeoPixel。`platformio.ini` 互相保持一致。
 
@@ -36,7 +36,7 @@
 > **A 排针从未真正插进面包板，或 K 背包与屏体的 16 针并口虚接**，
 > 电流根本没经过 PCF8574。**"背光亮 = 供电到位"在本机不成立。**
 > 下次要做的第一步是万用表量背包排针与屏体的通断，不是改固件。
-> 详见 [`HARDWARE.md`](HARDWARE.md) 第 2b 节。
+> 详见 [`HARDWARE.md`](HARDWARE.md) §3.5。
 
 ## 板载 WS2812 在 GPIO 48（已实机验证）
 

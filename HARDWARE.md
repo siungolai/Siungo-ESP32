@@ -1,12 +1,24 @@
-# 配件清单 · Siungo-ESP32
+# 硬件与工具链参数 · Siungo-ESP32
 
 本仓库各示例项目用到的硬件与工具链参数。**参数以本机实测为准**（esptool 读回 + `pio pkg list`），不是抄的规格书。
 
-实测日期：2026-10-14
+实测日期：2026-10-14（DHT11 一节 2026-10-15 复核）
+
+## 阅读说明
+
+- 本文件是**仓库级硬件事实的唯一来源**。其他文档引用硬件事实时必须带本文件定位，约定见 [`pet-oled3/CONTEXT.md`](pet-oled3/CONTEXT.md)：**优先用 `§节号`**（章节锚点，结构变动不过期），确需精确到行时才用 `:行号-行号`。
+- 术语遵循 [`pet-oled3/CONTEXT.md`](pet-oled3/CONTEXT.md) 的命名约定：本文件用**上游/下游**（不叫主从）、**选通/断开**（不叫打开/关闭）、**tick**（不叫帧）。首次出现的缩写均已给出全称。
+- 每个器件的状态分三类，文中分别标注：
+  - **实测可用**：本机跑通的配置；
+  - **规格已核实**：来自厂商数据手册的规格事实，未在本机验证；
+  - **未调通/已废止**：本机失败或被放弃的方案，参数表保留作为设计依据。
+- 未经本机实测的规划内容一律明确标注「待 bringup 验证」，不写成事实。
 
 ---
 
 ## 1. 主控开发板
+
+### 1.1 板级参数
 
 | 项目 | 参数 |
 |---|---|
@@ -17,7 +29,7 @@
 | 晶体 | 40 MHz |
 | Flash | 16 MB |
 | PSRAM | 8 MB（OPI，`qio_opi`） |
-| USB 串口 | 板载原生 USB（USB CDC），`-DARDUINO_USB_CDC_ON_BOOT=1` |
+| USB 串口 | 板载原生 USB（USB CDC，Universal Serial Bus Communication Device Class），`-DARDUINO_USB_CDC_ON_BOOT=1` |
 | MAC 地址（本机这块） | `7C:4F:AD:1E:00:E4` |
 | 系统枚举 | 显示为 `USB VID:PID=303A:1001`（Espressif 原生 USB） |
 | 连接端口（本机） | **COM4** |
@@ -25,7 +37,29 @@
 | IO 电平 | 3.3 V（**直接短到 GND 或 3V3 会烧 IO**） |
 | PlatformIO board ID | `esp32-s3-devkitc-1` |
 
-### 关键板级配置（`platformio.ini`）
+### 1.2 GPIO 资源与占用约束
+
+ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机已确认的占用与禁区：
+
+| GPIO | 状态 | 依据 |
+|---|---|---|
+| GPIO 1 / GPIO 2 | **I2C 禁接** | 实测全段超时，见 [§6.1](#61-gpio-1--gpio-2-上-i2c-完全不通实测) |
+| GPIO 19 / GPIO 20 | **禁占** | 原生 USB D+/D-（USB-Serial-JTAG），占用即失去板载串口下载，见 [§1.1](#11-板级参数) |
+| GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled) |
+| GPIO 7 | DHT11 数据脚 | 见 [§5.3](#53-接线dht11) |
+| GPIO 26–32 | SPI0/1，封装内 Flash/PSRAM 已占 | 规格已核实，不推荐他用 |
+| GPIO 33–37 | 8 线 SPI 高位数据线 | 本板 OPI PSRAM 已占用 |
+| GPIO 38 | 规划中：编码器按键 | 待 bringup 验证 |
+| GPIO 43 / GPIO 44 | UART0（Universal Asynchronous Receiver-Transmitter，通用异步收发器） | 规格已核实 |
+| GPIO 39–42 | JTAG（Joint Test Action Group） | 规格已核实 |
+| GPIO 48 | 板载 WS2812 数据脚 | 规格已核实 + 本机实测 |
+
+> ESP32-S3 的 GPIO 分三档驱动能力：默认驱动强度 GPIO17/18 = 10mA、GPIO19/20 = 40mA、其余 20mA；累计 IO 输出电流上限 1500mA。数据手册未给出每脚绝对最大电流——常见引用的 40mA 是 `PAD_DRIVER=3` 档的典型源电流，不是绝对最大值。
+
+### 1.3 关键板级配置（`platformio.ini`）
+
+六个主项目（`uptime-oled` / `dht11-oled` / `clock-oled` / `lcd1602-uptime` / `blink3` / `pin-probe`）
+的 `platformio.ini` 板级配置完全一致：
 
 ```ini
 [env:esp32-s3-devkitc-1]
@@ -40,18 +74,20 @@ monitor_speed = 115200
 build_flags = -DARDUINO_USB_CDC_ON_BOOT=1
 ```
 
+`uptime-oled` / `dht11-oled` / `clock-oled` / `lcd1602-uptime` 四个项目的 `build_flags` 另加 `-Wall -Wextra`；`blink3` / `pin-probe` 不加。各诊断工具（`tools/*`）同样只有 `-DARDUINO_USB_CDC_ON_BOOT=1`。
+
 > 换成普通 8MB Flash、无 PSRAM 的 S3-DevKitC-1 时，去掉 `board_build.arduino.memory_type` 那一行。
 
 ---
 
-## 2. 显示屏
+## 2. 显示屏：SSD1306 OLED（实测可用）
 
-### 已知事实
+### 2.1 规格与接口参数
 
 | 项目 | 参数 |
 |---|---|
 | 型号 | **SSD1306** |
-| 接口 | **I2C**（IIC） |
+| 接口 | **I2C**（IIC，Inter-Integrated Circuit） |
 | 分辨率 | **128 × 64** |
 | I2C 7 位地址 | **0x3C**（实测应答）<br>模块丝印 `0x78` 是含读写位的 8 位写法；少数模块为 `0x3D`（丝印 `0x7A`） |
 | 尺寸/颜色 | 未记录（0.96" / 1.3" 常见，本驱动与尺寸无关） |
@@ -62,7 +98,20 @@ build_flags = -DARDUINO_USB_CDC_ON_BOOT=1
 >
 > 首轮调试时曾把型号记作「SSD13159」，那是输入笔误，该型号并不存在。
 
-### 接线（SSD1306 OLED）
+### 2.2 显存模型
+
+| 项目 | 参数 |
+|---|---|
+| 显存总量 | 1024 字节（128 列 × 8 页） |
+| 分页方式 | 8 页，每页 8 行像素 × 128 列 |
+| 字节含义 | 1 字节 = 1 列中的 8 个垂直像素，**bit0 = 页内最上一行** |
+| 寻址模式 | 页寻址（`0x20, 0x02`） |
+| I2C 速率 | 400 kHz（诊断时降到 100 kHz 提高容错） |
+
+> 字模取模方向必须与显存一致：**1 字节 1 列，bit0 = 页内最上一行**。
+> 另行替换字库时务必对齐，否则字会显示成乱块。
+
+### 2.3 接线（SSD1306 OLED）
 
 | OLED 排针 | ESP32-S3 | 说明 |
 |---|---|---|
@@ -76,28 +125,115 @@ build_flags = -DARDUINO_USB_CDC_ON_BOOT=1
 >
 > **SCL 与 SDA 接反 = 完全不显示**，这是最常见的不亮原因。
 
-### 显存模型
+### 2.4 I2C 报文格式与传输分块
 
-| 项目 | 参数 |
+裸驱直接操作 I2C 报文，控制字节决定后面跟的是命令还是显存数据：
+
+| 控制字节 | 含义 |
 |---|---|
-| 显存总量 | 1024 字节（128 列 × 8 页） |
-| 分页方式 | 8 页，每页 8 行像素 × 128 列 |
-| 字节含义 | 1 字节 = 1 列中的 8 个垂直像素，**bit0 = 页内最上一行** |
-| 寻址模式 | 页寻址（`0x20, 0x02`） |
-| I2C 速率 | 400 kHz（诊断时降到 100 kHz 提高容错） |
+| `0x00` | 后面是命令流 |
+| `0x40` | 后面是显存数据流 |
 
-> 字模取模方向必须与显存一致：**1 字节 1 列，bit0 = 页内最上一行**。
-> 另行替换字库时务必对齐，否则字会显示成乱块。
+`flush()` 把 1024 字节显存按页下发：每页 128 列，单次事务最多带 `kChunkPayload = 64` 字节载荷（ESP32 Arduino 的 `Wire` 缓冲约 128 字节，含控制字节与地址字节的余量），所以每页拆 2 次事务，一轮刷新共 **8 页 × 2 次 = 16 次事务**。
+
+### 2.5 初始化序列
+
+裸驱在 `begin()` 里下发 17 条命令，取自 SSD1306 数据手册：
+
+| 序号 | 命令 | 作用 |
+|---|---|---|
+| 1 | `0xAE` | 关显示（初始化期间不亮） |
+| 2 | `0xD5 0x80` | 时钟分频比 / 振荡器频率 |
+| 3 | `0xA8 0x3F` | 多路复用比 = 64 |
+| 4 | `0xD3 0x00` | 显示偏移 = 0 |
+| 5 | `0x40` | 起始行 = 0 |
+| 6 | `0x8D 0x14` | **电荷泵：3.3V 供电必须开** |
+| 7 | `0x20 0x02` | 寻址模式 = 页寻址 |
+| 8 | `0xA1` | 段重映射（左右镜像） |
+| 9 | `0xC8` | 行扫描方向反转 |
+| 10 | `0xDA 0x12` | COM 引脚硬件配置 |
+| 11 | `0x81 0xCF` | 对比度 = 0xCF |
+| 12 | `0xD9 0xF1` | 预充电周期 |
+| 13 | `0xDB 0x40` | VCOMH 电平 |
+| 14 | `0xA4` | 显存内容直出 |
+| 15 | `0xA6` | 正常显示（不反色） |
+| 16 | `0x2E` | 停止滚动 |
+| 17 | `0xAF` | 开显示 |
+
+`setCursor(page, col)` 由三条命令组成：`0xB0 | (page & 0x07)` 选页，`0x00 | (col & 0x0F)` 设列低 4 位，`0x10 | ((col >> 4) & 0x0F)` 设列高 4 位。
+
+### 2.6 驱动接口
+
+裸驱有两份：`uptime-oled` 版（`uptime-oled/src/ssd1306_i2c.h`，88 行）是 ASCII 绘制，
+`clock-oled` 版（`clock-oled/src/ssd1306_i2c.h`，114 行）扩展中文与任意 y 定位。
+两份的常量、构造函数、`begin()` / `flush()` / `probe()` 完全相同；
+差异只在绘制接口的返回类型与中文能力，见下方各表。
+
+#### 常量与构造函数
+
+| 符号 | 值 / 签名 | 说明 |
+|---|---|---|
+| `OLED_WIDTH` | `128` | 列数 |
+| `OLED_HEIGHT` | `64` | 像素行数 |
+| `OLED_PAGES` | `8` | 页数 |
+| `OLED_BUFFER_SIZE` | `1024` | 显存缓冲字节数 |
+| `Ssd1306I2c(...)` | `Ssd1306I2c(uint8_t scl, uint8_t sda, uint8_t addr = 0x3C, uint32_t hz = 400000)` | 引脚、7 位地址、总线时钟 |
+
+#### 生命周期
+
+| 方法 | 说明 |
+|---|---|
+| `bool begin()` | 初始化 `Wire`（含 `setTimeOut(50)`）并下发初始化序列；内部自动调用 `fontDirProbe()` |
+| `bool ready() const` | 探测是否成功；`flush()` 在失败时直接返回 |
+| `void flush()` | 把显存缓冲下发到屏，16 次事务 |
+| `void fontDirProbe()` | 画两条参照竖条并停留 **6000ms**，用于人工核对字模方向；串口给出判读指引 |
+| `void clear()` | 清显存缓冲 |
+
+#### ASCII 绘制（`uptime-oled`）
+
+| 方法 | 说明 |
+|---|---|
+| `void drawChar5x7(uint8_t x, uint8_t page, char c)` | 在 (x, page) 画一个 5×7 字符，第 6 列清零作字距 |
+| `void drawText5x7(uint8_t x, uint8_t page, const char* s)` | 画 ASCII 字符串。`uptime-oled` 版返回 `void`；`clock-oled` 版返回 `uint8_t`（下一个可用 x） |
+| `void drawText5x7Scaled2x(uint8_t x, uint8_t page, const char* s)` | 2 倍放大绘制；字形高 14 像素，**跨 page 与 page+1 两页**，步进 12 列 |
+| `void fillPageSpan(uint8_t x0, uint8_t x1, uint8_t page, uint8_t pattern)` | 用同一 pattern 填充一段像素（进度条用） |
+
+#### 中文与任意定位绘制（`clock-oled` 扩展）
+
+| 方法 | 说明 |
+|---|---|
+| `uint8_t drawText5x7Y(uint8_t x, uint8_t y, const char* s)` | 按像素行 y 定位，返回下一个可用 x |
+| `void drawText5x7Scaled2xY(uint8_t x, uint8_t y, const char* s)` | 2 倍放大的 y 定位版 |
+| `void drawCnChar(uint8_t x, uint8_t page, uint32_t codepoint)` / `drawCnCharY(uint8_t x, uint8_t y, uint32_t codepoint)` | 画一个汉字，每字 16 列 |
+| `uint8_t drawTextCn(uint8_t x, uint8_t page, const char* s)` / `drawTextCnY(uint8_t x, uint8_t y, const char* s)` | 画含中文的字符串，返回下一个可用 x |
+| `static uint8_t cnTextWidth(const char* s)` | 计算字符串像素宽度，**每汉字 16 列** |
+| `void drawBits(uint8_t x, uint8_t y, const uint8_t* cols, uint8_t n, uint8_t rowsHeight)` | 直接画点阵；`rowsHeight` 取 8 或 16，**取 16 时每列 2 字节、低字节在前**；跨页自动 OR，暗点不写，越界即停 |
+
+> page 版行距只能是 8 的倍数；y 版可任意像素行定位。字形缺失时画方框占位。
+
+#### 底层命令
+
+| 方法 | 说明 |
+|---|---|
+| `void cmd(uint8_t c)` | 写单条命令（控制字节 `0x00`） |
+| `void cmd2(uint8_t c, uint8_t arg)` | 写带参数的命令 |
+| `void setCursor(uint8_t page, uint8_t col)` | 设页与列 |
+| `bool probe()` | `beginTransmission(addr)` + `endTransmission() == 0` |
+
+驱动还用到一个匿名命名空间常量：`kChunkPayload = 64`（单次事务最大载荷字节）、
+`kFontDirProbeMs = 6000`（字模自检图案停留时长，毫秒）。
 
 ---
 
-## 2b. 显示屏：1602A 字符液晶（I2C 版）—— ⚠️ 本机未调通，项目已废止
+## 3. 显示屏：1602A 字符液晶（I2C 版）—— 未调通，项目已废止
 
 > **2026-10-14 实测结论：这块 1602 + PCF8574 背包在本机没有调通，
 > `lcd1602-uptime` 项目已废止（代码保留，不上架）。**
 > 下面的参数表是**设计时核实的事实**（规格与协议均经独立来源交叉验证），
 > 不是"本机实测可用"的证明——实测恰好相反，器件始终无应答。
 > 故障判读见本节末尾。
+
+### 3.1 规格参数
 
 | 项目 | 参数 |
 |---|---|
@@ -111,25 +247,28 @@ build_flags = -DARDUINO_USB_CDC_ON_BOOT=1
 | DDRAM 行偏移 | 每行 40 字节：第 1 行 `0x00`，第 2 行 **`0x40`** |
 | 对比度调节 | 背包上的蓝色电位器（调 V0） |
 
-### PCF8574 → LCD 引脚映射（业界统一）
+### 3.2 PCF8574 → LCD 引脚映射
 
-| PCF8574 位 | 接到 LCD | 含义 |
-|---|---|---|
-| P0 | RS | 0=命令 1=数据 |
-| P1 | RW | 恒 0（只写不读） |
-| P2 | E | 使能脉冲 |
-| P3 | 背光 | 1=开 |
-| P4–P7 | D4–D7 | 数据高 4 位 |
+业界统一映射，与本仓库驱动的常量一致：
+
+| PCF8574 位 | 驱动常量 | 接到 LCD | 含义 |
+|---|---|---|---|
+| P0 | `LCD_BIT_RS` = `0x01` | RS | 0=命令 1=数据 |
+| P1 | `LCD_BIT_RW` = `0x02` | RW | 恒 0（只写不读） |
+| P2 | `LCD_BIT_E` = `0x04` | E | E 脉冲（使能选通） |
+| P3 | `LCD_BIT_BL` = `0x08` | 背光 | 1=开 |
+| P4–P7 | — | D4–D7 | 数据高 4 位 |
 
 HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次送，每次打一次 E 脉冲。
 
-### ⚠️ 5V 与 ESP32 电平冲突（接错会损坏 IO）
+### 3.3 5V 与 ESP32 电平冲突
 
 1602 要 5V 才有足够对比度，而 **ESP32-S3 的 IO 不是 5V 耐受的**——
 绝对最大输入电压 `VDD+0.3V` ≈ **3.6V**。
+
 关键在于 **PCF8574 背包板上的 4.7k 上拉电阻挂在背包 VCC 上**：
 背包接 5V，SDA/SCL 的 HIGH 电平就是 5V，直连 ESP32 会经 ESD 保护二极管灌电流、
-**慢性损坏引脚**（不会当场冒烟）。
+**慢性损坏引脚**（不会当场损坏）。
 
 正确做法：背包 VCC 接 5V，**SDA/SCL 经双向电平转换模块**再进 GPIO4/GPIO5，两侧共地。
 模块优先选 **MOSFET 型（BSS138）或 PCA9306**；TXB0104 有方向检测，在开漏总线上可能振荡。
@@ -137,7 +276,7 @@ HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次�
 > 第一次上电前建议用万用表量背包 SDA/SCL 对 GND 的空闲电压：
 > 应等于转换模块 **LV 侧**的 3.3V。量到 5V 就先别接 ESP32。
 
-### 接线（1602A，与 OLED 共用同一组 GPIO）
+### 3.4 接线（1602A，与 OLED 共用同一组 GPIO）
 
 | 1602 背包排针 | ESP32-S3 | 说明 |
 |---|---|---|
@@ -149,7 +288,7 @@ HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次�
 > GPIO4/5 在 ESP32-S3 上都是普通 IO，无 strapping、非 SPI0/1，两屏可安全共用。
 > 详见 [`lcd1602-uptime/README.md`](lcd1602-uptime/README.md) 第 2 节。
 
-### 本机实测记录（2026-10-14）：器件始终无应答，未调通
+### 3.5 本机实测记录（2026-10-14）：器件始终无应答
 
 最终按 **3.3V 供电**接线（把背包 VCC 接到 3V3，上拉随之变 3.3V，无需电平转换），
 排除超压因素后复测：
@@ -196,12 +335,79 @@ HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次�
 若以后换一片背包/屏再试，可直接复用。项目当前状态见
 [`lcd1602-uptime/README.md`](lcd1602-uptime/README.md) 顶部。
 
+### 3.6 驱动接口
+
+裸驱同样完整可用，接口如下。
+
+#### 常量与构造函数
+
+| 符号 | 值 / 签名 | 说明 |
+|---|---|---|
+| `LCD_COLS` | `16` | 列数 |
+| `LCD_ROWS` | `2` | 行数 |
+| `LCD_ROW_OFFSET` | `static const uint8_t LCD_ROW_OFFSET[2] = {0x00, 0x40}` | 两行在 DDRAM 中的起始偏移 |
+| `Lcd1602I2c(...)` | `Lcd1602I2c(uint8_t scl, uint8_t sda, uint8_t addr = 0x27, uint32_t hz = 100000)` | 引脚、7 位地址、总线时钟 |
+
+#### HD44780 命令码
+
+| 常量 | 值 | 常量 | 值 |
+|---|---|---|---|
+| `LCD_CMD_CLEAR` | `0x01` | `LCD_CMD_SHIFT` | `0x10` |
+| `LCD_CMD_HOME` | `0x02` | `LCD_CMD_FUNCTION_SET` | `0x20` |
+| `LCD_CMD_ENTRY_MODE` | `0x04` | `LCD_CMD_SET_CGRAM` | `0x40` |
+| `LCD_CMD_DISPLAY_CTRL` | `0x08` | `LCD_CMD_SET_DDRAM` | `0x80` |
+
+#### 生命周期与绘制
+
+| 方法 | 说明 |
+|---|---|
+| `bool begin()` | 用构造时给的地址初始化 |
+| `bool beginAt(uint8_t addr)` | 换地址重新初始化（地址 fallback 用） |
+| `bool ready() const` | 上次探测是否成功 |
+| `uint8_t address() const` | 当前实际地址 |
+| `void clear()` | 清屏（耗时 1.52ms） |
+| `void home()` | 光标回原点 |
+| `void setCursor(uint8_t col, uint8_t row)` | 定位到 (col, row)，col 越界钳到 `LCD_COLS - 1` |
+| `void print(const char* s)` | 从当前光标开始打印 |
+| `void printLine(uint8_t row, const char* s)` | 写整行并**补空格到 16 列**，防上一次内容的残影 |
+| `void backlight(bool on)` | 背光开关 |
+| `bool backlightOn() const` | 背光状态 |
+
+#### 底层
+
+| 方法 | 说明 |
+|---|---|
+| `void writeNibble(uint8_t nibble, bool isData)` | 送半个字节（nibble 左移到 D4–D7，RW 恒 0） |
+| `void sendByte(uint8_t value, bool isData)` | **一次 I2C 事务写 4 个状态字节**完成一个字节 |
+| `void writeRaw(uint8_t value)` | 直接写 PCF8574 影子寄存器 |
+| `bool probe()` | 探测器件是否应答 |
+
+`sendByte()` 的 4 个状态字节依次是 `hiData | E=1`、`hiData`、`loData | E=1`、`loData`。朴素写法一个字节要 4 次事务，合并后**写 1 个字符 = 1 次 I2C 事务**，整屏 32 字符从 128 次降到 32 次。
+
+#### 时序常量
+
+| 常量 | 值 | 依据 |
+|---|---|---|
+| `kPulseUs` | `1` | E 脉冲要求 > 450ns |
+| `kCmdDelayUs` | `40` | 命令间隔要求 > 37us |
+| `kInitDelayMs` | `5` | 上电初始化要求 > 4.1ms |
+| `kClearDelayMs` | `2` | 清屏耗时 1.52ms |
+| `kLongCmdUs` | `1600` | 慢命令余量 |
+
+初始化序列：`delay(5)` → `writeNibble(0x03)` ×3（间隔 5ms / 200us / 200us）→ `writeNibble(0x02)` 切 4 位模式 → `sendByte(FUNCTION_SET | 0x08)`（4 位 / 2 行 / 5×8）→ `sendByte(DISPLAY_CTRL | 0x04)`（显示开、光标关）→ `clear()` → `sendByte(ENTRY_MODE | 0x02)`（写完光标右移）。
+
+> PCF8574 没有读改写能力，驱动内部维护影子寄存器 `shadow_`，每次写都覆盖全 8 位。
+
 ---
 
-## 2c. I2C 多路复用器：PCA9548A（8 通道）—— 养成游戏项目新增
+## 4. I2C 多路复用器：PCA9548A（8 通道）—— 规格已核实，待 bringup 验证
 
 > **状态：已购成品模块，尚未接线验证。** 本节的"已核实"是**规格事实**（来自 TI 官方数据手册），
-> 不是"本机实测可用"。本机验证记录见下节，待 bringup 完成后补。
+> 不是"本机实测可用"。上游/下游上拉归属见 [§4.3](#43-上拉电阻归属)，
+> 上电后第一件事是显式选通，见 [§4.2](#42-控制寄存器的三个实现细节) 的提示框。
+> bringup 验证清单见 [§4.8](#48-待本机验证bringup-必做)。
+
+### 4.1 规格参数
 
 | 项目 | 参数 |
 |---|---|
@@ -209,15 +415,16 @@ HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次�
 | 功能 | 8 通道双向 I2C/SMBus 开关（1-of-8），**用于解决同址器件冲突** |
 | 通道选择 | 控制寄存器 1 字节，bit N = 1 选通通道 N；**支持任意组合同时选通** |
 | I2C 7 位地址 | **由 A0/A1/A2 三个硬件脚决定**：`1110 A2 A1 A0`，全接地 = **0x70**；一条总线最多 8 片（0x70–0x77） |
-| 上电默认 | **所有通道 deselect** —— 复位与上电后必须**软件显式选通**才通 |
-| 供电范围 | **2.3 V – 5.5 V**，可在 1.8/2.5/3.3/5 V 总线间电平转换 |
+| 上电默认 | **所有通道断开** —— 复位与上电后必须**软件显式选通**才通 |
+| 供电范围 | **1.65 V – 5.5 V**（85–125 °C 时降至 1.65–3.6 V），可在 1.8/2.5/3.3/5 V 总线间电平转换 |
 | I/O 耐压 | **5 V tolerant**（本方案全 3.3 V，用不到） |
 | 频率上限 | **400 kHz** |
+| 导通电阻 | RON 典型 5 Ω，最大 12 Ω（3–3.6 V，IO 15mA） |
 | RESET 脚 | **active-low**，拉低即复位（下游总线卡死时的恢复手段） |
-| 内部上拉 | **无** —— 每条被启用的下游通道需**各自**外部上拉 |
+| 内部上拉 | **无** —— 每条被选通的下游通道需**各自**外部上拉 |
 | 热插拔 | 支持（TI 标称 hot insertion） |
 
-### 控制寄存器的三个实现细节（TI 手册原文，写驱动必读）
+### 4.2 控制寄存器的三个实现细节
 
 来自 TI `SCPS207H` 第 7.5.4 节，这三条直接决定代码怎么写：
 
@@ -231,24 +438,24 @@ HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次�
    byte received."* 所以连续写两个字节不会叠加，后一个覆盖前一个。
 
 > 📌 **上电后第一件事必须是显式选通某一路**（或确认全断），因为上电/复位/RESET 后所有通道都是
-> deselect 状态，此时**下游三块屏全部不可见**——扫不到 0x3C 是正常的，不是屏坏了。
+> 断开状态，此时**下游三块屏全部不可见**——扫不到 0x3C 是正常的，不是屏坏了。
 
-### ⚠️ 上拉电阻归属（本机已确认的两件事，不要混为一谈）
+### 4.3 上拉电阻归属
 
 PCA9548A 不带内部上拉，上拉要分**上游**和**下游**两处看。本机结论：
 
 | 位置 | 上拉来源 | 依据 | 结论 |
 |---|---|---|---|
 | **上游**（ESP32 ↔ PCA9548A） | PCA9548A **成品模块板载 10k** | 用户确认模块带 10k | ✅ 不需再加 |
-| **下游**（PCA9548A ↔ 三块屏） | **SSD1306 模块板载** | 本节下方 `link-probe` 实测 `pullup=HIGH float=HIGH` | ✅ 不需再加 |
+| **下游**（PCA9548A ↔ 三块屏） | **SSD1306 模块板载** | [§3.5](#35-本机实测记录2026-10-14器件始终无应答) 的 `link-probe` 实测 `pullup=HIGH float=HIGH` | ✅ 不需再加 |
 
 > ⚠️ **禁止项：不要再往 SDA/SCL 补 4.7k 上拉。** 上游已有 10k、下游每块屏自带，
 > 重复并联会把等效阻值拉得过低，逼近 SSD1306 的低电平驱动极限（标称 sink ≈ 3mA）。
 >
 > 📌 上面那个 `link-probe` 实测**只证明屏那一侧有上拉**（当时总线上只挂了 SSD1306），
-> **不能证明 PCA9548A 上游有上拉**。本次是模块自带的 10k 覆盖了上游，两件事互相独立。
+> **不能证明 PCA9548A 上游有上拉**。上游那条来自用户对成品模块的确认，两件事互相独立。
 
-### ⚠️ 多通道并发时的上拉并联风险（设计约束）
+### 4.4 多通道并发时的上拉并联风险（设计约束）
 
 PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [ADR-0002](pet-oled3/docs/adr/0002-single-channel-sequential-refresh.md)），原因：
 
@@ -261,18 +468,20 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 
 **本方案采用「一次只选通一路」**：`选通道 → 刷屏 → 断开 → 下一路`。任一时刻只有一块屏的上拉在线，不存在并联，且能故障隔离、逐通道观测应答。
 
-### 接线（PCA9548A 上游）
+### 4.5 接线（PCA9548A 上游）
 
 | PCA9548A 排针 | ESP32-S3 | 说明 |
 |---|---|---|
 | **SDA** | **GPIO 8** | 建议值，待 bringup 实测确认 |
 | **SCL** | **GPIO 9** | 同上 |
-| VCC | 3V3 | 模块支持 2.3–5.5 V |
+| VCC | 3V3 | 模块支持 1.65–5.5 V |
 | GND | GND | |
 | A0 / A1 / A2 | GND（跳线） | 目标地址 **0x70**，**以实际扫描结果为准**。地址表：LLL=0x70 / LLH=0x71 / LHL=0x72 / LHH=0x73 / HLL=0x74 / HLH=0x75 / HHL=0x76 / HHH=0x77 |
 | RESET | 3V3 或悬空 | active-low；多数模块已内部上拉。bringup 阶段先悬空 |
 
-### 接线（三块屏的通道分配）
+A0 = pin22、A1 = pin23、A2 = pin18，各自直连 VCC 或 GND；RESET = pin24，不用时经上拉接 VCC。
+
+### 4.6 三块屏的通道分配
 
 | 通道 | 器件 | 说明 |
 |---|---|---|
@@ -284,25 +493,38 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 > 三块屏**全部保持 0x3C 出厂地址** —— 因为每条通道上只有一个 0x3C 器件，
 > 地址冲突在**通道层面**被隔离。这正是 PCA9548A 存在的意义，**不需要动烙铁改地址**。
 
-### 🚫 硬约束：GPIO 1 / GPIO 2 上 I2C 完全不通
+### 4.7 规划中的驱动接口（尚未实现）
 
-见下方「3b. 硬件踩坑记录」。新项目 I2C 脚位**必须避开 1 和 2**，不要再试。
+以下接口来自 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md) §5.2 的设计稿，**代码尚未实现**，仅记录设计约定：
 
-另需**避开 GPIO 19 / 20**（原生 USB D+/D-），占用即失去板载串口下载。
+| 接口 | 约定 |
+|---|---|
+| `bool pca9548a_select(uint8_t channel)` | `channel` 取 0–7；只选通这一路，其余全部断开 |
+| `bool pca9548a_deselect_all()` | 全部断开 |
+| `bool Display::begin(uint8_t channel)` / `void Display::flush()` | 每块屏绑定一个通道，`flush()` 前自动选通、用完断开 |
 
-### 待本机验证（bringup 必做）
+驱动内部维护通道缓存：`select(n)` 若 `n` 等于当前通道，直接返回、不产生 I2C 事务。设计上**刻意不暴露** `pca9548a_write_mask(uint8_t mask)`，避免调用方同时选通多路触发上拉并联。
+
+选通的寄存器写入必须覆盖 [§4.2](#42-控制寄存器的三个实现细节) 第 2 条：一次完整的 `beginTransmission(0x70) → write(1 << channel) → endTransmission()`，等 STOP 之后通道才真正生效。
+
+### 4.8 待本机验证（bringup 必做）
 
 - [ ] 扫描 0x70–0x77，确认 PCA9548A **实际地址**（跳线可能焊死，不一定 0x70）
 - [ ] 万用表量各通道 SDA/SCL 对 VCC 阻值，确认模块上拉**挂在上游还是八路全挂**
 - [ ] 逐通道探测 0x3C，确认三块屏都能被找到
 - [ ] **三块屏显示不同内容**（同内容无法区分是否真的切换成功）
 - [ ] 记录 `endTransmission()` 是否返回 5（超时）
+- [ ] 确认 GPIO 8 / GPIO 9 作上游 SDA / SCL 在本机可用
+- [ ] 验证「选通在一次完整事务的 STOP 之后才生效」（见 [§4.2](#42-控制寄存器的三个实现细节)）
 
-> 项目背景与完整接线表见 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md)。
+> 完成后回写本节：把「规格已核实」改为「实测可用」，并把 [§4.7](#47-规划中的驱动接口尚未实现) 的规划接口替换为实现签名。
+> 项目背景与完整接线表见 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md) 的 M0 里程碑。
 
 ---
 
-## 3. 温湿度传感器：DHT11（带灯模块）
+## 5. 温湿度传感器：DHT11（带灯模块，实测可用）
+
+### 5.1 规格参数
 
 | 项目 | 参数 |
 |---|---|
@@ -315,33 +537,110 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 | 供电 | 3.3 V（模块板 3.3–5 V 均可，本机接 3V3） |
 | 上拉电阻 | **模块自带**（4.7k~10k），无需外接；裸传感器才要补 |
 | 指示灯 | 模块自带的电源/指示灯，**恒亮，不表示读到数据** |
-| 驱动库 | Adafruit `DHT sensor library`（`DHT11` 型号常量） |
 
-> **注意库的两个硬限制**（都是实机踩出来的）：
+> 上表的 0–50 °C / 20–90 %RH 是**驱动接受范围**，即精度保证范围，不是器件物理极限。
+> 驱动内常量 `DHT11_TEMP_MIN` / `DHT11_TEMP_MAX` / `DHT11_HUM_MIN` / `DHT11_HUM_MAX`
+> 就取这四个值，超出即判 `DHT_ERR_RANGE`。
+
+### 5.2 自写时序驱动（零第三方依赖）
+
+`dht11-oled` 的 DHT11 时序为**本仓库自写**（`src/dht11.h`，仅用 Arduino core API），
+`platformio.ini` 无 `lib_deps`。
+
+> **已弃用：Adafruit `DHT sensor library`。** 本机实机踩出两个硬约束，是该库被弃用的原因：
 > 1. **最小读取间隔 2000 ms 硬编码在库里**，间隔不够时 `read()` 不碰硬件、
->    直接返回上一次的结果——看起来在读，其实是旧值。
+>    直接返回上一次的结果——看起来在读，其实是旧值。且该库没有"一次拿到温度和湿度两个值"的接口，
+>    背靠背调 `readHumidity()` + `readTemperature()` 会让第二次读到垃圾，实机症状是湿度正常、温度恒显 `--`。
 > 2. **传感器不在线时库会关中断自旋**（`expectPulse()`），
 >    累计超时足以触发 `Interrupt wdt timeout on CPU1` 反复重启。
 >    详见 [`dht11-oled/README.md`](dht11-oled/README.md) 的「已知边界」一节。
 >
 > 带灯模块的灯由模块 VCC 供电，只要通电就亮，**与程序是否读到数据无关**。
 
-### 接线（DHT11）
+#### 接口
+
+| 符号 | 签名 / 说明 |
+|---|---|
+| `dht11Read` | `inline uint8_t dht11Read(uint8_t pin, DhtReading& out)` —— 一次传输解出 5 字节 40 位；**不做节流**，节流是调用方职责 |
+| `dhtDataLineLooksAlive` | `inline bool dhtDataLineLooksAlive(uint8_t pin, bool* externallyPulled)` —— 先 `INPUT_PULLUP` 读一次、再纯 `INPUT` 读一次，外部读到 HIGH 才证明上拉存在 |
+| `formatDhtCsv` | `inline void formatDhtCsv(uint32_t sec, const DhtReading& r, uint32_t failCount, char* out, size_t outLen)` —— 输出 `t=%lus,hum=%s,temp=%s,ok=%u,fail=%lu`，无效量写 `--` 不写 0 |
+| `dhtStatusText` | `inline const char* dhtStatusText(uint8_t status)` —— 返回 `OK` / `NO RESPONSE` / `TIMEOUT` / `BAD CHECKSUM` / `OUT OF RANGE` / `UNKNOWN` |
+
+#### 数据结构
+
+```cpp
+enum DhtStatus : uint8_t {
+  DHT_OK = 0,
+  DHT_ERR_NO_RESPONSE,
+  DHT_ERR_TIMEOUT,
+  DHT_ERR_CHECKSUM,
+  DHT_ERR_RANGE
+};
+
+struct DhtReading {
+  float temperature = 0.0f;
+  float humidity = 0.0f;
+  bool tempValid = false;
+  bool humValid = false;
+  uint8_t status = DHT_OK;
+  uint32_t atMs = 0;
+};
+```
+
+#### 时序与位判决
+
+| 阶段 | 实现 | 手册要求 |
+|---|---|---|
+| 起始信号 | `digitalWrite(pin, LOW); delay(20)` | ≥ 18 ms |
+| 等待应答低 | 循环上限 `cyclesPerUs * 100` | 80 µs |
+| 等待应答高结束 | 同上 | 80 µs |
+| 收 40 位 | `noInterrupts()` 期间逐位测宽，每位低/高各有循环上限 | 每位 50 µs 低 + 26–28 µs(0) / 70 µs(1) 高 |
+| 结束 | 50 µs 低电平后释放总线 | — |
+
+位判决关键行：
+
+```cpp
+if (highCycles > lowCycles) { data[i / 8] |= (1u << (7 - (i % 8))); }
+```
+
+比较**本位**高低电平的实测宽度，**不能用名义 50 µs 阈值**——`digitalRead` 循环开销会放大阈值，
+导致 40 位全判 0。
+
+校验和：`data[0] + data[1] + data[2] + data[3] == data[4]`。
+解码：`humidity = data[0]`、`temperature = data[2]`（`data[1]` / `data[3]` 为小数位，恒 0）。
+
+### 5.3 接线（DHT11）
 
 | DHT11 模块排针 | ESP32-S3 | 说明 |
 |---|---|---|
-| **DATA**（有时标 S / OUT） | **GPIO 7** | 用户指定；模块自带 DAC 上拉 |
+| **DATA**（有时标 S / OUT） | **GPIO 7** | 用户指定；模块自带上拉 |
 | VCC（+） | 3V3 | |
 | GND（-） | GND | |
 
 > 引脚编号写在 [`dht11-oled/src/main.cpp`](dht11-oled/src/main.cpp) 顶部的 `PIN_DHT_DATA`。
 > DHT11 与 OLED 用的是两组互不相干的引脚，可以同时接。
 
+### 5.4 采样节拍
+
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `TICK_MS` | `1000` | 主循环节拍 |
+| `SAMPLE_MS` | `1000` | 采样间隔（1 Hz 上限内） |
+| `RETRY_MS` | `2000` | 失败后的重试间隔 |
+| `DHT_WARMUP_MS` | `1500` | 上电预热，期间不判失败 |
+| `OLED_RETRY_MS` | `5000` | 屏掉线后的重试间隔 |
+
+失败重试节拍：
+
+```cpp
+hasReading ? SAMPLE_MS : ((now < DHT_WARMUP_MS) ? UINT32_MAX : RETRY_MS)
+```
+
 ---
 
-## 3b. 硬件踩坑记录
+## 6. 硬件踩坑记录
 
-### GPIO1 / GPIO2 上总线完全不通
+### 6.1 GPIO 1 / GPIO 2 上 I2C 完全不通（实测）
 
 2026-10-14 首轮调试时，OLED 接 **GPIO1(SCL) / GPIO2(SDA)**，表现为：
 
@@ -357,17 +656,20 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 > 返回 **5** = 「超时」（总线根本没法完成事务）。
 > 看到 5 就不要再纠结地址了，直接查物理层接线。
 
-### 从机不在线时不要刷新
+### 6.2 下游器件不在线时不要刷新（实测）
 
 `flush()` 发 8 页 × 2 次 I2C 事务，屏不在线时每次 `endTransmission()` 都阻塞到 50ms 超时，
 一轮刷新近 **800ms** —— 足以把 1 秒的节拍带偏。
 
 因此 `flush()` 在探测失败后直接返回，**计时精度与屏幕在线状态完全解耦**。
-实测：屏缺席时仍为 **45 帧 / 45 秒 = 1.0000 帧每秒**，无漂移。
+实测：屏缺席时仍为 **45 tick / 45 秒 = 1.0000 tick 每秒**，无漂移。
+
+> 所有驱动统一 `Wire.setTimeOut(50)`（总线卡死时不无限等待），
+> 这个 50 ms 就是上面 800 ms 的来源：8 页 × 2 次事务 × 50 ms。
 
 ---
 
-## 4. 工具链版本（本机实测）
+## 7. 工具链版本（本机实测）
 
 | 组件 | 版本 |
 |---|---|
@@ -382,35 +684,47 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 
 ---
 
-## 5. 第三方库依赖
+## 8. 第三方库依赖
 
-`uptime-oled` / `lcd1602-uptime` / `blink3`（外接灯模式）等**无第三方依赖**，
-只用 Arduino core 自带的 `Wire`。
-
-`clock-oled` 同样**无第三方依赖**：OLED 复用 `uptime-oled` 的裸驱，
-联网只用 Arduino core 自带的 `WiFi`（内含 SNTP 客户端），
-没有引入 NTPClient / ESP32Time 等外部库。
-
-**`dht11-oled` 是唯一例外**，它引入一个库：
-
-| 库 | 版本 | 用途 |
+| 项目 | 第三方依赖 | 说明 |
 |---|---|---|
-| `DHT sensor library`（Adafruit） | 1.4.7 | DHT11 单总线协议时序 |
+| `uptime-oled` | **无** | 只用 Arduino core 自带的 `Wire` |
+| `clock-oled` | **无** | OLED 复用 `uptime-oled` 的裸驱；联网只用 core 自带的 `WiFi`（内含 SNTP 客户端），未引入 NTPClient / ESP32Time |
+| `dht11-oled` | **无** | DHT11 时序与 SSD1306 驱动均自写，只用 core API |
+| `lcd1602-uptime` | **无** | 只用 Arduino core 自带的 `Wire` |
+| `blink3` | `adafruit/Adafruit NeoPixel@^1.15.5`（实际拉取 **1.15.5**） | **仅** `ENABLE_ONBOARD_RGB=1` 板载 WS2812 模式需要；外接三灯模式零依赖 |
+| `pin-probe` | **无** | 只用 core API |
 
-> 这个库有两个硬限制（2000ms 最小读取间隔、传感器不在线时关中断自旋），
-> 是本项目实机踩坑的来源，详见 [`dht11-oled/README.md`](dht11-oled/README.md)。
-> OLED 部分仍是自写裸驱，不依赖 Adafruit_SSD1306。
+### 自写驱动清单
 
-OLED 驱动为自写裸驱（`uptime-oled/src/ssd1306_i2c.cpp` + `font5x7.h`，约 200 行）：
+OLED 驱动为自写裸驱（`uptime-oled/src/ssd1306_i2c.cpp` + `.h` + `font5x7.h`，约 400 行）：
 自带 1KB 显存缓冲、5×7 点阵字库（95 个 ASCII 字形）、2 倍放大绘制、分块传输。
+`clock-oled` 版（`clock-oled/src/ssd1306_i2c.cpp` + `.h`，约 435 行）另加
+16×16 点阵中文字库、任意像素行定位与通用贴图 `drawBits()`。
 
-1602 驱动同样是自写裸驱（`lcd1602-uptime/src/lcd1602_i2c.cpp` + `.h`，约 200 行）：
+1602 驱动同样是自写裸驱（`lcd1602-uptime/src/lcd1602_i2c.cpp` + `.h`，约 335 行）：
 HD44780 4 位模式初始化序列、PCF8574 影子寄存器、两个 nibble 合并进一次 I2C 事务。
 1602 内置字库，**不需要外挂点阵字模**。
 
+DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#52-自写时序驱动零第三方依赖)。
+
+### Adafruit NeoPixel（`blink3` 板载灯模式）
+
+| API | 说明 |
+|---|---|
+| `Adafruit_NeoPixel(uint16_t pixels, uint16_t pin, neoPixelType type = NEO_GRB + NEO_KHZ800)` | 构造：灯珠数、数据脚、时序类型 |
+| `bool begin(void)` | 初始化 |
+| `void setPixelColor(uint16_t n, uint8_t r, uint8_t g, uint8_t b)` | 设某颗灯的颜色 |
+| `void setBrightness(uint8_t)` | 全局亮度 |
+| `static uint32_t Color(uint8_t r, uint8_t g, uint8_t b)` | 打包成 32 位色值 |
+
+`NEO_GRB` 表示传输顺序是 **G, R, B**（不是 R, G, B）。许可证 BSD-3-Clause。
+
 ---
 
-## 6. 资源占用
+## 9. 资源占用
+
+> **口径说明**：RAM = `.dram0.data + .dram0.bss`（ELF 段合计）；Flash = `firmware.bin` 镜像总大小（含 image header、分区表与校验），故比 ELF 段合计略大。下表数字沿用构建时记录值。
 
 ### `uptime-oled`
 
@@ -449,7 +763,41 @@ HD44780 4 位模式初始化序列、PCF8574 影子寄存器、两个 nibble 合
 
 ---
 
-## 7. 相关文档
+## 10. 诊断工具
+
+仓库共 7 个诊断工具工程（5 类工具，`i2c-scan` / `bus-probe` 各有两份副本），
+每个自带 `platformio.ini`，可独立烧录：
+
+| 工具 | 位置 | 用途 |
+|---|---|---|
+| `i2c-scan` | `uptime-oled/tools/i2c-scan`、`lcd1602-uptime/tools/i2c-scan` | 扫描 `0x08–0x77` |
+| `bus-probe` | `uptime-oled/tools/bus-probe`、`dht11-oled/tools/bus-probe` | 读 SCL/SDA 静态电平 |
+| `link-probe` | `lcd1602-uptime/tools/link-probe` | 1602 总线上拉判读 |
+| `power-probe` | `lcd1602-uptime/tools/power-probe` | 供电链路检查 |
+| `dht-probe` | `dht11-oled/tools/dht-probe` | DHT11 数据线上拉判读 |
+
+共性参数：`PIN_I2C_SCL=4` / `PIN_I2C_SDA=5`（`dht-probe` 用 `PIN_DHT_DATA=7`）、
+`Serial.begin(115200)`（`blink3` / `pin-probe` 提为常量 `SERIAL_BAUD=115200`）、
+`Wire.setTimeOut(50)`。
+
+`i2c-scan` 的扫描速率用 **100 kHz** 而不是 400 kHz，注释说明扫描阶段优先容错；
+`i2c-scan` 每轮之间停 2ms/3000ms，`bus-probe` / `link-probe` / `dht-probe` 每 3000 ms 复测一次。
+`i2c-scan` 只把 `err != 0 && err != 2` 的结果打成 `[ERR]` 行 —— 这正是判读「无应答」与「超时」的分界。
+
+### `endTransmission()` 错误码
+
+| 返回 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 数据过长 |
+| 2 | 地址无应答（**器件不在这个地址**） |
+| 3 | 数据无应答 |
+| 4 | 其它 |
+| 5 | 超时（**总线根本没法完成事务**） |
+
+---
+
+## 11. 相关文档
 
 ### 数据手册原始出处
 
@@ -461,13 +809,13 @@ HD44780 4 位模式初始化序列、PCF8574 影子寄存器、两个 nibble 合
 | ESP32-S3 数据手册 v2.2 | [espressif.com](https://www.espressif.com/documentation/esp32-s3_datasheet_en.pdf) | `.tmp-research/ESP32S3-FACTS.md` |
 | TCA9548A 数据手册 `SCPS207H` | [ti.com](https://www.ti.com/lit/ds/symlink/tca9548a.pdf) | `.tmp-research/TCA9548A-FACTS.md` |
 
-> 提取件里的引脚表、地址表、控制寄存器原文，是本节 §2c 与 §1 参数的依据；需要复核时看这两个文件。
+> 提取件里的引脚表、地址表、控制寄存器原文，是本节 §1、§4 参数的依据；需要复核时看这两个文件。
 
 ### 仓库内文档
 
 - 项目说明与屏幕布局：[`uptime-oled/README.md`](uptime-oled/README.md)
 - 联网时钟（NTP 对时 + 漂移说明）：[`clock-oled/README.md`](clock-oled/README.md)
-- DHT11 温湿度监测（含库的看门狗坑）：[`dht11-oled/README.md`](dht11-oled/README.md)
+- DHT11 温湿度监测（含弃用 Adafruit DHT 库的原因）：[`dht11-oled/README.md`](dht11-oled/README.md)
 - 1602 项目（含 5V 电平转换专章）：[`lcd1602-uptime/README.md`](lcd1602-uptime/README.md)
 - 板载 WS2812 引脚判定：[`pin-probe/README.md`](pin-probe/README.md)
 - 养成游戏策划案（三屏 + PCA9548A 方案）：[`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md)

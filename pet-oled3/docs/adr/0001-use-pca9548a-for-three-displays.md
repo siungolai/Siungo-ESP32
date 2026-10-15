@@ -71,4 +71,4 @@ I2C0 带一块屏，I2C1 带两块（那两块仍需劈一块地址）。
 
 - PCA9548A 数据手册：TI PCA9548A Low Voltage 8-Channel I2C Switch with Reset (Rev. G)
 - 已核实规格：8 通道、地址由 A0/A1/A2 决定、上电全 deselect、400kHz 上限、active-low RESET、无内部上拉
-- 本机 SSD1306 板载上拉已由 [`../../../HARDWARE.md:159-161`](../../../HARDWARE.md) 实测确认（`pullup=HIGH float=HIGH`）
+- 本机 SSD1306 板载上拉已由 [`../../../HARDWARE.md`](../../../HARDWARE.md) §3.5 实测确认（`pullup=HIGH float=HIGH`）

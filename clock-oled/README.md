@@ -206,7 +206,8 @@ Check, in this order:
 
 ## 相关文档
 
-- OLED 驱动与显存模型：[`../HARDWARE.md`](../HARDWARE.md) 第 2 节
+- OLED 驱动、显存模型与接口：[`../HARDWARE.md`](../HARDWARE.md) §2
+- PCA9548A 与三块屏的通道分配：[`../HARDWARE.md`](../HARDWARE.md) §4
 - 同款屏的非阻塞刷新范例：[`../uptime-oled/README.md`](../uptime-oled/README.md)
 - 硬件诊断工具（屏完全无应答时用）：[`../uptime-oled/tools/i2c-scan`](../uptime-oled/tools/i2c-scan)
 - 仓库总览：[`../README.md`](../README.md)
