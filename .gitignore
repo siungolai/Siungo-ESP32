@@ -32,3 +32,9 @@ __pycache__/
 
 # 数据手册原文与提取中间产物（PDF + 文本层 + 一次性脚本），体积大且可重新下载
 /.tmp-research/
+
+# status-oled 的 ADR 与代码审查报告：暂不公开（决策依据已内联进该项目 README
+# 的「设计取舍」节，外部引用已全部改写，入库不受影响）。
+# 注意必须写全路径前缀：这条规则只覆盖 status-oled 一个项目，
+# pet-oled3/docs/ 与 status-oled3/docs/ 是已入库的项目文档，不受影响。
+/status-oled/docs/

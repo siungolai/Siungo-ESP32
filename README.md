@@ -12,13 +12,16 @@
 | [dht11-oled](dht11-oled/) | **DHT11 温湿度实时监测**，每 1s 刷新屏幕。DATA→**GPIO7**、OLED SCL→GPIO4 / SDA→GPIO5；零第三方依赖自写时序；弃用 Adafruit DHT 库的原因见其 README | ESP32-S3-DevKitC-1 N16R8 |
 | [clock-oled](clock-oled/) | **联网时钟**：NTP 对时后显示时间与日期，每 1s 刷新，大号 HH:MM + 日期星期。每小时自动重新对时压漂移。OLED SCL→GPIO4 / SDA→GPIO5；**需先建 `src/secrets.h` 填 WiFi** | ESP32-S3-DevKitC-1 N16R8 |
 | [pet-oled3](pet-oled3/) | **养成类掌上宠物**（策划阶段，尚未动工）：三块 SSD1306 分饰角色/数值/日志，经 **PCA9548A** 解决同址冲突，4x4 键盘出三个主动作，旋转编码器调参，蜂鸣器出音效 | ESP32-S3-DevKitC-1 N16R8 |
-| [status-oled3](status-oled3/) | **桌面状态显示器**（策划阶段，尚未动工）：三块 SSD1306 分饰 ESP32 状态/阿里云服务器状态/邮箱未读数，经 **PCA9548A** 解决同址冲突；两个轻触按钮切换功能，有源蜂鸣器做通知提醒 | ESP32-S3-DevKitC-1 N16R8 |
+| [status-oled](status-oled/) | **ESP32 自身状态监视器**：单屏四页（总览/身份/堆/总线），轻触按钮循环翻页，每 1s 刷新数值。**不联网、零第三方依赖、无 secrets.h**；OLED SCL→GPIO4 / SDA→GPIO5，按钮→GPIO7（与 dht11-oled 的 DATA 脚冲突，同一时间只插一个）。**已编译通过，未上板** | ESP32-S3-DevKitC-1 N16R8 |
+| [status-oled3](status-oled3/) | **桌面状态显示器**（M0 固件已编译，**尚未上板**）：三块 SSD1306 分饰 ESP32 状态/阿里云服务器状态/邮箱未读数，经 **PCA9548A** 解决同址冲突；两个轻触按钮切换功能，有源蜂鸣器做通知提醒 | ESP32-S3-DevKitC-1 N16R8 |
 
 硬件与工具链参数（含实测数据）见 **[HARDWARE.md](HARDWARE.md)** —— 器件规格、接线、驱动接口与踩坑记录。
 
 `blink3` 的外接三灯模式与 `pin-probe`、`uptime-oled` 只用标准 Arduino API；`blink3` 的板载模式用 Adafruit NeoPixel。`platformio.ini` 互相保持一致。
 
 `clock-oled` 用 Arduino core 自带的 `WiFi`（无外部库），OLED 驱动与 `uptime-oled` 同一份裸驱。
+
+`status-oled` 与 `status-oled3` 是两个不同的项目：前者**单屏、纯本地、零依赖、已可编译**；后者三屏 + PCA9548A + 服务器轮询，M0 固件已编译但**尚未上板**。
 
 ## 已废止的项目
 
@@ -73,6 +76,7 @@
 - 只想点个灯 → `blink3`（README 里有两种模式的说明、接线图、限流电阻取值、`TIME_SCALE` 台架验证法）
 - **板载灯不亮** → `pin-probe`（1 分钟判定：是 GPIO 号问题，还是板上根本没这颗灯）
 - 要用 OLED 显示运行时长 → `uptime-oled`（屏幕探测不到时会报清楚是接线还是地址问题，并附硬件诊断工具）
+- **要看这块板子现在怎么样（不联网）** → `status-oled`（单屏四页 + 按钮翻页，RAM 6.2% / Flash 8.6%，已可编译）
 - **要显示时间与日期** → `clock-oled`（先建 `src/secrets.h` 填 WiFi，否则编译不过）
 - **要测温湿度** → `dht11-oled`（DATA 接 GPIO7；屏幕会直接显示是"没接传感器"还是"线接错了"）
 - **要做三块屏的项目 / 要玩 I2C 多路复用** → `pet-oled3`（**只有文档，尚无代码**；先读它的 `docs/策划案.md`，动手第一步是 M0 bringup）

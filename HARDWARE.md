@@ -30,7 +30,7 @@
 | Flash | 16 MB |
 | PSRAM | 8 MB（OPI，`qio_opi`） |
 | USB 串口 | 板载原生 USB（USB CDC，Universal Serial Bus Communication Device Class），`-DARDUINO_USB_CDC_ON_BOOT=1` |
-| MAC 地址（本机这块） | `7C:4F:AD:1E:00:E4` |
+| MAC 地址 | **不公开记录**。本仓库文档中出现的 MAC 一律是虚构示例（当前统一用 `12:34:56:78:9A:BC`），真实值只在板子自己的屏幕上显示、或从串口读；需要真实值时用 `tools/i2c-scan` 同级的串口日志或 `pio device monitor` 看开机行 |
 | 系统枚举 | 显示为 `USB VID:PID=303A:1001`（Espressif 原生 USB） |
 | 连接端口（本机） | **COM4** |
 | 板载 WS2812 | 本机这块是 **v1.0**，数据脚 **GPIO 48**（v1.1 起官方已取消） |
@@ -46,7 +46,7 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 | GPIO 1 / GPIO 2 | **I2C 禁接** | 实测全段超时，见 [§6.1](#61-gpio-1--gpio-2-上-i2c-完全不通实测) |
 | GPIO 19 / GPIO 20 | **禁占** | 原生 USB D+/D-（USB-Serial-JTAG），占用即失去板载串口下载，见 [§1.1](#11-板级参数) |
 | GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled) |
-| GPIO 7 | DHT11 数据脚 | 见 [§5.3](#53-接线dht11) |
+| GPIO 7 | **按项目分角色，同一时间只插一个**：`dht11-oled` 的 DHT11 数据脚 / `status-oled` 的翻页按钮 | 两者不能同时插——DHT11 模块自带 4.7k~10k 上拉，会与按钮要用的内部上拉并联，见 [§5.3](#53-接线dht11) |
 | GPIO 26–32 | SPI0/1，封装内 Flash/PSRAM 已占 | 规格已核实，不推荐他用 |
 | GPIO 33–37 | 8 线 SPI 高位数据线 | 本板 OPI PSRAM 已占用 |
 | GPIO 38 | 规划中：编码器按键 | 待 bringup 验证 |
@@ -58,7 +58,7 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 
 ### 1.3 关键板级配置（`platformio.ini`）
 
-六个主项目（`uptime-oled` / `dht11-oled` / `clock-oled` / `lcd1602-uptime` / `blink3` / `pin-probe`）
+六个主项目（`uptime-oled` / `dht11-oled` / `clock-oled` / `lcd1602-uptime` / `blink3` / `pin-probe` / `status-oled`）
 的 `platformio.ini` 板级配置完全一致：
 
 ```ini
@@ -71,12 +71,44 @@ board_upload.flash_size = 16MB
 board_build.arduino.memory_type = qio_opi
 
 monitor_speed = 115200
-build_flags = -DARDUINO_USB_CDC_ON_BOOT=1
+build_flags = -DARDUINO_USB_CDC_ON_BOOT=1 -DBOARD_HAS_PSRAM
 ```
 
 `uptime-oled` / `dht11-oled` / `clock-oled` / `lcd1602-uptime` 四个项目的 `build_flags` 另加 `-Wall -Wextra`；`blink3` / `pin-probe` 不加。各诊断工具（`tools/*`）同样只有 `-DARDUINO_USB_CDC_ON_BOOT=1`。
 
-> 换成普通 8MB Flash、无 PSRAM 的 S3-DevKitC-1 时，去掉 `board_build.arduino.memory_type` 那一行。
+> 换成普通 8MB Flash、无 PSRAM 的 S3-DevKitC-1 时，去掉 `board_build.arduino.memory_type` 与 `-DBOARD_HAS_PSRAM` 两处。
+
+#### 1.3.1 `-DBOARD_HAS_PSRAM` 为什么必须手写（2026-10-15 实测坐实）
+
+`board=esp32-s3-devkitc-1` 在本机 platform 7.1.3 下解析出的板名是
+`Espressif ESP32-S3-DevKitC-1-N8 (8 MB QD, No PSRAM)`，即**按 N8 变体**处理。
+Arduino 的 PSRAM 开关来自 `boards.txt` 的 `esp32s3.menu.PSRAM.*` 菜单项，而菜单项
+不会被 board 名自动选中，所以 `-DBOARD_HAS_PSRAM` 根本不会进入编译命令行。
+
+后果链（已用反汇编坐实，不是推测）：
+
+1. `cores/esp32/esp32-hal-psram.c` 的 `psramFound()` 被编译成**桩分支**
+   （`#else` 里的 `return false`）。反汇编该目标文件得到：
+   `entry a1, 32` / `movi.n a2, 0` / `retw.n` —— 恒返回 0。
+2. `Esp.cpp` 的 `getPsramSize()` 内部是 `if(psramFound()){...} return 0;`，
+   于是**永远返回 0**。
+3. 但 IDF 侧其实已经把 PSRAM 加进堆了：`heap_caps_get_total_size(MALLOC_CAP_SPIRAM)`
+   报 `8388607` 字节（= 2²³−1，首字节被预留），`heap_caps_malloc(1MB, MALLOC_CAP_SPIRAM)`
+   能成功分配且读写回验正确。
+
+**症状**：`status-oled` 的 P2 身份页 `MEM` 行显示 `16M+0K`，与本节记录的 8MB PSRAM
+直接矛盾——是**屏上可见的错误信息**，不是纯内部问题。
+
+**注意区分两个配置层次**：`board_build.arduino.memory_type = qio_opi` 只管
+**链接期**的内存布局与镜像类型，管不到 `BOARD_HAS_PSRAM` 这个**编译期运行标志**。
+两者必须同时存在，缺一不可。
+
+修复后实测：`psramFound()` 由 0 变 1，`ESP.getPsramSize()` 报 `8386295` 字节，
+串口开机行由 `psram 0 bytes` 变为 `psram 8386295 bytes`。
+
+> 本仓库所有 `memory_type = qio_opi` 的项目都缺这一行，`status-oled` 是第一个
+> 发现并修好的；其余项目在遇到 PSRAM 相关行为（`ps_malloc` 恒返回 NULL、
+> `ESP.getPsramSize()` 恒为 0）时按本节处理。
 
 ---
 
@@ -761,16 +793,42 @@ DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#5
 > RAM / Flash 明显高于 `uptime-oled`，全部来自 `libWiFi` 协议栈
 > （联网对时的必然代价），与 OLED 或时钟逻辑无关。
 
+### `status-oled`
+
+| 项目 | 占用 |
+|---|---|
+| RAM | 20,344 字节 / 327,680（**6.2%**） |
+| Flash | 287,841 字节 / 3,342,336（**8.6%**） |
+| 编译告警 | 0（开启 `-Wall -Wextra`） |
+
+> 与 `uptime-oled` 基本持平（Flash 多 4,868 字节），差额来自四页渲染、
+> 按钮状态机、总线扫描字符串与 `FLASH` 行的分区查询。
+>
+> **已上板**（2026-10-15，COM4）：1 秒节拍实测准确（75 秒无漂移），
+> 按键翻页正常，OLED 在 `0x3C` 在线，
+> `RTC_NOINIT_ATTR` 计数跨硬复位保留（`boot#15` → `boot#17`）。
+> 运行时读数 `HEAP 358/382K`、`CPU 240MHz`、
+> `psram 8386295 bytes`（补 `-DBOARD_HAS_PSRAM` 之后，见 §1.3.1）。
+> 注意 Flash 占用会随代码微调变动，以最新一次构建为准。
+
+### `status-oled/tools/i2c-scan`
+
+| 项目 | 占用 |
+|---|---|
+| RAM | 19,164 字节 / 327,680（**5.8%**） |
+| Flash | 280,909 字节 / 3,342,336（**8.4%**） |
+| 编译告警 | 0（未开 `-Wall -Wextra`，与既有 `i2c-scan` 副本一致） |
+
 ---
 
 ## 10. 诊断工具
 
-仓库共 7 个诊断工具工程（5 类工具，`i2c-scan` / `bus-probe` 各有两份副本），
+仓库共 8 个诊断工具工程（5 类工具，`i2c-scan` 现有三份副本），
 每个自带 `platformio.ini`，可独立烧录：
 
 | 工具 | 位置 | 用途 |
 |---|---|---|
-| `i2c-scan` | `uptime-oled/tools/i2c-scan`、`lcd1602-uptime/tools/i2c-scan` | 扫描 `0x08–0x77` |
+| `i2c-scan` | `uptime-oled/tools/i2c-scan`、`lcd1602-uptime/tools/i2c-scan`、`status-oled/tools/i2c-scan` | 扫描 `0x08–0x77` |
 | `bus-probe` | `uptime-oled/tools/bus-probe`、`dht11-oled/tools/bus-probe` | 读 SCL/SDA 静态电平 |
 | `link-probe` | `lcd1602-uptime/tools/link-probe` | 1602 总线上拉判读 |
 | `power-probe` | `lcd1602-uptime/tools/power-probe` | 供电链路检查 |
@@ -782,6 +840,9 @@ DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#5
 
 `i2c-scan` 的扫描速率用 **100 kHz** 而不是 400 kHz，注释说明扫描阶段优先容错；
 `i2c-scan` 每轮之间停 2ms/3000ms，`bus-probe` / `link-probe` / `dht-probe` 每 3000 ms 复测一次。
+
+> `status-oled` 的 P4 总线页自带一次 0x08–0x77 扫描（启动时一次，之后每 10 秒静默重扫），
+> 所以它的 `i2c-scan` 副本是"怀疑 P4 读数不对时"的第二意见，不是日常必跑的工具。
 `i2c-scan` 只把 `err != 0 && err != 2` 的结果打成 `[ERR]` 行 —— 这正是判读「无应答」与「超时」的分界。
 
 ### `endTransmission()` 错误码
