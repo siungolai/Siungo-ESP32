@@ -21,10 +21,19 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_system.h>
+#include <math.h>
 #include <string.h>
 
 #include "config.h"
 #include "ssd1306_i2c.h"
+
+// V1.1：芯片温度传感器与任务栈水位。
+// temp_sensor.h 在 include/driver/esp32s3/include/driver/ 下（按芯片分目录）。
+// FreeRTOS 的 task.h 提供 uxTaskGetStackHighWaterMark——本机 FreeRTOSConfig.h
+// 里 INCLUDE_uxTaskGetStackHighWaterMark=1，且 qio_opi/libfreertos.a 有实现。
+#include "driver/temp_sensor.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // ------------------------------------------------------------------ 复位计数
 // 必须用 RTC_NOINIT_ATTR（.rtc_noinit，NOLOAD）：软复位 / 看门狗复位后保留，
@@ -68,6 +77,17 @@ static const char* gSdkVersion = "";
 // 当前运行分区（app0）的容量，用于算固件占用率。开机读一次。
 static uint32_t gAppPartitionBytes = 0;
 
+// ------------------------------------------------------------------ V1.1 采样值
+// 芯片温度：每秒在节拍里读一次，存在这里供 renderPage 用。
+// gTempValid 区分"读失败"和"读到 0 度"——不能靠数值判断。
+static float gTempCelsius = 0.0f;
+static bool gTempValid = false;
+static bool gTempInited = false;  // 传感器只需 init 一次
+
+// 栈已用量（字节）= 栈总量 - 历史最小剩余栈。
+// uxTaskGetStackHighWaterMark 返回 BYTES（见 config.h 注释）。
+static uint32_t gStackUsedBytes = 0;
+
 // 本程序自己的 uptime，不从 millis() 直接除，避免把 setup() 里的等待算进去。
 static uint32_t uptimeSec() {
   return (millis() - bootMs) / 1000UL;
@@ -93,6 +113,17 @@ static void fmtK1(uint32_t bytes, char* out, size_t outLen) {
   const uint32_t frac = (bytes * 10UL / 1024UL) % 10UL;
   snprintf(out, outLen, "%lu.%luK", static_cast<unsigned long>(whole),
            static_cast<unsigned long>(frac));
+}
+
+// 一位小数的 M，带四舍五入。专给 PSRAM 行用。
+// 为什么不能用 fmtK1 的思路（直接截断）：PSRAM 真实总量是 8386295 字节，
+// 截断会得到 7.9M，而模块标称 8MB——屏上显示 7.9M 会被读成"少了一块"。
+// 整数四舍五入：先加半个单位再整除，避免引入浮点。
+static void fmtM1Round(uint32_t bytes, char* out, size_t outLen) {
+  // 十分之一 M（104857.6 字节）为单位作整数运算：(bytes*10 + 0.5M) / 1M
+  const uint32_t tenths = (bytes * 10UL + 524288UL) / 1048576UL;
+  snprintf(out, outLen, "%lu.%luM", static_cast<unsigned long>(tenths / 10UL),
+           static_cast<unsigned long>(tenths % 10UL));
 }
 
 // 一行同时给出 K 值和占用百分比，例如 "283.7K 13%"。
@@ -187,6 +218,46 @@ static void scanBus() {
   }
   lastRescan = millis();
   lastScanAgeSec = 0;
+}
+
+// ------------------------------------------------------------------ V1.1 每秒采样
+// 芯片温度：temp_sensor 只需 init 一次，之后反复 read。
+// 放在节拍里而不是 setup 里，是为了不拖慢"上电即显"。
+// 读失败不清零 gTempCelsius，只把 valid 置 false，屏上显示 n/a——
+// 这样能区分"传感器坏了"和"恰好读到 0 度"。
+static void sampleTemperature() {
+  if (!config::TEMP_ENABLED) {
+    return;
+  }
+  if (!gTempInited) {
+    temp_sensor_config_t cfg = TSENS_CONFIG_DEFAULT();
+    if (temp_sensor_set_config(cfg) != ESP_OK) {
+      gTempValid = false;
+      return;
+    }
+    if (temp_sensor_start() != ESP_OK) {
+      gTempValid = false;
+      return;
+    }
+    gTempInited = true;
+  }
+  float c = 0.0f;
+  if (temp_sensor_read_celsius(&c) == ESP_OK) {
+    gTempCelsius = c;
+    gTempValid = true;
+  } else {
+    gTempValid = false;
+  }
+}
+
+// 任务栈：uxTaskGetStackHighWaterMark(NULL) 查"调用者自己"（即 loopTask）。
+// 返回的是历史最小剩余栈，单位字节，所以已用 = 总量 - 水位。
+// 只查 main/loop 一条：拿全部任务列表需要 uxTaskGetSystemState，
+// 本机 libfreertos.a 里没有该符号（qio_opi 变体），做不成任务列表。
+static void sampleStack() {
+  const uint32_t hwm = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+  gStackUsedBytes =
+      (hwm <= config::LOOP_STACK_BYTES) ? (config::LOOP_STACK_BYTES - hwm) : 0;
 }
 
 // ------------------------------------------------------------------ 绘制
@@ -291,6 +362,18 @@ static void renderPage() {
         snprintf(value, sizeof(value), "ERR");
       }
       drawRow(config::ROW_FIRST + 4, "I2C", value);
+
+      // 芯片温度（V1.1）：1 位小数。满量程 -10~80°C，格式串按最坏情况
+      // 预留符号位（-40.0 C 是 7 字符，放得下 17 列）。
+      // 不做平滑：本项目一贯如实显示原始读数，且温度是装饰性数据。
+      if (gTempValid) {
+        const long t10 = lroundf(gTempCelsius * 10.0f);  // 放大成整数再拆
+        snprintf(value, sizeof(value), "%ld.%ld C", t10 / 10L,
+                 labs(t10 % 10L));  // 负数取绝对小数位，-3.4 不能显示成 -3.-4
+      } else {
+        snprintf(value, sizeof(value), "n/a");
+      }
+      drawRow(config::ROW_FIRST + 5, "TEMP", value);
       break;
     }
 
@@ -351,26 +434,16 @@ static void renderPage() {
       const uint32_t freeH = ESP.getFreeHeap();
       const uint32_t minH = ESP.getMinFreeHeap();
       const uint32_t maxH = ESP.getMaxAllocHeap();
-      const uint32_t used = (total > freeH) ? (total - freeH) : 0;
-
-      // DRAM：已用 / 总量，同一行给出分子分母（原独立的 USED 行被吸收）。
-      // 分母恒为 382K，分子每秒微跳——这是唯一的动态项。
-      char usedStr[12];
-      char totalStr[12];
-      fmtK1(used, usedStr, sizeof(usedStr));
-      fmtK1(total, totalStr, sizeof(totalStr));
-      snprintf(value, sizeof(value), "%s/%s", usedStr, totalStr);
-      drawRow(config::ROW_FIRST + 0, "DRAM", value);
 
       // FREE / MIN / MAX 的百分比一律以 DRAM 为分母，全页同参照系。
       fmtK1Pct(freeH, pctOf(freeH, total), value, sizeof(value));
-      drawRow(config::ROW_FIRST + 1, "FREE", value);
+      drawRow(config::ROW_FIRST + 0, "FREE", value);
 
       fmtK1Pct(minH, pctOf(minH, total), value, sizeof(value));
-      drawRow(config::ROW_FIRST + 2, "MIN", value);
+      drawRow(config::ROW_FIRST + 1, "MIN", value);
 
       fmtK1Pct(maxH, pctOf(maxH, total), value, sizeof(value));
-      drawRow(config::ROW_FIRST + 3, "MAX", value);
+      drawRow(config::ROW_FIRST + 2, "MAX", value);
 
       // FRAG：碎片率 = (DRAM - MAX) / DRAM。
       // 分母取 DRAM 而非 FREE，是为了与前四行同参照系，一行行读下来不换基准。
@@ -379,7 +452,43 @@ static void renderPage() {
       const uint32_t frag = pctOf(total - maxH, total);
       snprintf(value, sizeof(value), "%lu%%",
                static_cast<unsigned long>(frag));
-      drawRow(config::ROW_FIRST + 4, "FRAG", value);
+      drawRow(config::ROW_FIRST + 3, "FRAG", value);
+
+      // STACK（V1.1）：报"已用"而不是"剩余水位"。
+      // 水位是 uxTaskGetStackHighWaterMark(NULL)，单位 BYTES（见 config.h 注释）。
+      // 报已用是为了与全页方向一致：数值大 = 消耗大 = 该关注。
+      // 若直接报剩余，数值大反而代表安全，会与其它行读反。
+      // 同时给出基数 32.0K，否则单看 26.0K 无法判断紧不紧张。
+      if (gStackUsedBytes <= config::LOOP_STACK_BYTES) {
+        char usedS[12];
+        char totalS[12];
+        fmtK1(gStackUsedBytes, usedS, sizeof(usedS));
+        fmtK1(config::LOOP_STACK_BYTES, totalS, sizeof(totalS));
+        snprintf(value, sizeof(value), "%s/%s", usedS, totalS);
+      } else {
+        snprintf(value, sizeof(value), "n/a");
+      }
+      // STACK 是 5 字符标签：%-4s 不会截断它（宽度是最小值不是最大值），
+      // 但会让数值紧贴标签，所以手工补一个前导空格——照 FLASH 行的先例。
+      // drawRow 会剥掉这个前导空格再算右对齐，所以不影响对齐逻辑。
+      // 缓冲区给足 48：value 最坏是 "32.8K/32.0K" 这种，-Wformat-truncation
+      // 会按 value 的声明尺寸（32）推最坏长度，给窄了会报警。
+      {
+        char spaced[48];
+        snprintf(spaced, sizeof(spaced), " %s", value);
+        drawRow(config::ROW_FIRST + 4, "STACK", spaced);
+      }
+
+      // DRAM：已用 / 总量，同一行给出分子分母（原独立的 USED 行被吸收）。
+      // V1.1 把它从首行挪到末行：它的价值是"声明分母"，而不是被优先阅读的数，
+      // 让 FREE/MIN/MAX/FRAG 四个真正要读的数占据前四行。
+      const uint32_t used = (total > freeH) ? (total - freeH) : 0;
+      char usedStr[12];
+      char totalStr[12];
+      fmtK1(used, usedStr, sizeof(usedStr));
+      fmtK1(total, totalStr, sizeof(totalStr));
+      snprintf(value, sizeof(value), "%s/%s", usedStr, totalStr);
+      drawRow(config::ROW_FIRST + 5, "DRAM", value);
       break;
     }
 
@@ -427,6 +536,24 @@ static void renderPage() {
       snprintf(value, sizeof(value), "%lu s ago",
                static_cast<unsigned long>(lastScanAgeSec));
       drawRow(config::ROW_FIRST + 4, "LAST", value);
+
+      // PSRAM（V1.1）：已用 / 总量。本固件从不分配 PSRAM，
+      // 所以这行恒为 0.0M/8.0M——它报告的是"这块板子有 8MB 可用"，
+      // 而不是"本程序用了多少"。见 ADR「PSRAM 只显示不使用」。
+      // 总量用四舍五入：真实 8386295 字节截断会得 7.9M，看着像少了一块。
+      // PSRAM 是 5 字符标签，手工补前导空格（与 STACK/FLASH 同族）。
+      {
+        char usedM[12];
+        char totalM[12];
+        const uint32_t psTotal = gPsramBytes;
+        const uint32_t psFree = ESP.getFreePsram();
+        const uint32_t psUsed = (psTotal > psFree) ? (psTotal - psFree) : 0;
+        fmtM1Round(psUsed, usedM, sizeof(usedM));
+        fmtM1Round(psTotal, totalM, sizeof(totalM));
+        char spaced[48];
+        snprintf(spaced, sizeof(spaced), " %s/%s", usedM, totalM);
+        drawRow(config::ROW_FIRST + 5, "PSRAM", spaced);
+      }
       break;
     }
   }
@@ -608,27 +735,47 @@ void loop() {
   // 发生 uint32_t 回绕，屏上 LAST 会显示约 4294966 s ago 这种垃圾值。
   lastScanAgeSec = (millis() - lastRescan) / 1000UL;
 
+  // V1.1：温度与栈每个节拍采一次，供 renderPage 与串口共用同一批读数。
+  sampleTemperature();
+  sampleStack();
+
   renderPage();
 
-  // 串口与屏上内容保持同源：屏上画什么，这里就报什么
+  // 串口全量摘要行（V1.1 改）：固定格式，不随当前页变化。
+  // V1.0 是"屏上画什么就报什么"，字段变多后那样翻页时格式会跳，
+  // 不利于挂机记录与 grep。现在把三页的关键字段并成一行，
+  // 挂在串口上跑一晚再 grep 就能看出趋势。
   const uint32_t up = uptimeSec();
+  char tempStr[16];
+  if (gTempValid) {
+    const long t10 = lroundf(gTempCelsius * 10.0f);
+    snprintf(tempStr, sizeof(tempStr), "%ld.%ldC", t10 / 10L, labs(t10 % 10L));
+  } else {
+    snprintf(tempStr, sizeof(tempStr), "n/a");
+  }
+  char stackStr[16];
+  snprintf(stackStr, sizeof(stackStr), "%lu/%luB",
+           static_cast<unsigned long>(gStackUsedBytes),
+           static_cast<unsigned long>(config::LOOP_STACK_BYTES));
   Serial.printf(
-      "P%u  UP %02lu:%02lu:%02lu  HEAP %lu/%luK  CPU %luMHz  RST %s\n", page + 1,
+      "UP %02lu:%02lu:%02lu  HEAP %lu/%luK  CPU %luMHz  TEMP %s  STACK %s  "
+      "PSRAM %lu/%luB  RST %s\n",
       static_cast<unsigned long>(up / 3600UL),
       static_cast<unsigned long>((up / 60UL) % 60UL),
       static_cast<unsigned long>(up % 60UL),
       static_cast<unsigned long>(ESP.getFreeHeap() / 1024UL),
       static_cast<unsigned long>(ESP.getHeapSize() / 1024UL),
-      static_cast<unsigned long>(getCpuFrequencyMhz()),
-      resetReasonNameRaw());
+      static_cast<unsigned long>(getCpuFrequencyMhz()), tempStr, stackStr,
+      static_cast<unsigned long>(ESP.getFreePsram()),
+      static_cast<unsigned long>(gPsramBytes), resetReasonNameRaw());
 
   // P2 的两个计数只画在屏上，串口每分钟补报一次，方便不上手就能核对
   // RTC_NOINIT 是否真的跨复位保留（ADR 0003 的验证点）。
   // K= 是按键累计次数，页眉已不再显示，只在这里留个计数。
   if (up % 60UL == 0UL) {
-    Serial.printf("      boot#%lu rst#%lu K=%u\n",
+    Serial.printf("      boot#%lu rst#%lu K=%u  page=P%u\n",
                   static_cast<unsigned long>(rtcBootCount),
                   static_cast<unsigned long>(rtcResetCount),
-                  static_cast<unsigned>(keyCount));
+                  static_cast<unsigned>(keyCount), page + 1);
   }
 }

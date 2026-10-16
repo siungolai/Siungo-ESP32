@@ -42,18 +42,22 @@ static const uint32_t RETRY_MS = 5000;  // 屏幕掉线后的重试间隔
 
 // ------------------------------------------------------------------ 版面
 // 四页，按钮循环切换，不自动轮播（Q2 的自动轮播在 Q9 被手动翻页取代）。
-// 每页 8 行：第 0 行页眉 + 第 1..5 行数据，第 6 行留空白；
-// 第 7 行不是空白——它放了右下角 SIUNGOLAI 水印（见下面的 ROW_LOGO）。
+// 每页 8 行：第 0 行页眉 + 第 1..6 行数据，第 7 行放页脚
+// （左端 V1.1 版本号 + 右端 SIUNGOLAI 水印，见下面的 ROW_LOGO）。
 // 5×7 字模每字符占 6 列，128/6 = 21，所以整行上限 21 字符；
 // MAC 那行「MAC 12:34:56:78:9A:BC」正好 21 字符贴边，是全屏最长的一行。
 // （文档里出现的 MAC 一律是虚构示例，真实值只来自板上运行时。）
 //
 // 标签固定占 4 字符，数值从第 5 列起，所以数值列上限 21 - 4 = 17 字符。
 // 所有 render 函数都靠这两个常量算可用宽度，改字模宽度只改这里。
+//
+// V1.1：四页统一 6 行数据（V1.0 是 P1/P3/P4 各 5 行、P2 6 行）。
+// 新增 TEMP(P1) / STACK(P3) / PSRAM(P4) 三行，行数终于对齐。
+// 注意 ROW_LAST 相应从 5 改为 6——第 7 行仍归水印。
 static const uint8_t PAGE_COUNT = 4;
 static const uint8_t ROW_PAGE = 0;    // 页眉行
 static const uint8_t ROW_FIRST = 1;   // 第一行数据
-static const uint8_t ROW_LAST = 5;    // 最后一行数据
+static const uint8_t ROW_LAST = 6;    // 最后一行数据（V1.1 由 5 改为 6）
 static const uint8_t CHAR_ADVANCE = 6;      // 每字符占 6 列（5 字形 + 1 间距）
 static const uint8_t MAX_COLS = 21;         // 128 / CHAR_ADVANCE
 static const uint8_t LABEL_COLS = 4;        // 标签宽度
@@ -75,13 +79,37 @@ static const uint8_t LOGO_X = 74;    // 128 - (9 * 6) = 74
 // 与水印共存的前提：水印固定占列 74..127（即列 12 之后），
 // 所以左侧可用 12 列；本值 4 字符占列 0..3，中间留 8 列间隔。
 // 改长到 12 字符以上就会撞上水印——tools/check_layout.py 会报错。
-static const char* const VERSION_TEXT = "V1.0";
+static const char* const VERSION_TEXT = "V1.1";
 
 // ------------------------------------------------------------------ 字模方向自检
 // 上电时按住按钮 >= 1.5s 才跑字模方向自检（Q20-C）：
 // 驱动画两条相隔 14 行的 1x4 参照竖条，停留 6 秒后自动清屏。
 // 两个时长都由调用方传入，不写死在驱动里；常态上电不跑，保证上电即显。
 static const uint32_t FONT_DIR_HOLD_MS = 1500;
+
+// ------------------------------------------------------------------ V1.1 新增字段
+// 芯片温度：ESP32-S3 内置温度传感器，测的是芯片自己的温度（约等于室温+几度），
+// 不是环境温度。满量程 -10~80°C、误差 <1°C，所以只给 1 位小数——
+// 给 2 位是假精度（传感器分辨不出 0.01°C）。
+// 采样在 loop() 的 1 秒节拍里做一次，不进 setup（上电即显优先）。
+static const bool TEMP_ENABLED = true;
+
+// 任务栈：uxTaskGetStackHighWaterMark(NULL) 返回调用任务的"历史最小剩余栈"。
+// 单位是 BYTES 而非 words——ESP-IDF 改过这个函数的原始行为，
+// task.h 注释原文：in bytes not words, unlike vanilla FreeRTOS。
+// 屏上要报"已用"，所以这两个常量用于换算：已用 = TOTAL - 水位。
+// loopTask 的栈大小来自 cores/esp32/main.cpp 的 ARDUINO_LOOP_STACK_SIZE
+// （默认 8192，本机 sdkconfig 的 CONFIG_ARDUINO_LOOP_STACK_SIZE 也是 8192）。
+// 注意 8192 的单位是 words（FreeRTOS 的栈深度单位），换算成字节要 ×4。
+static const uint32_t LOOP_STACK_WORDS = 8192;
+static const uint32_t LOOP_STACK_BYTES = LOOP_STACK_WORDS * 4UL;  // 32768
+
+// PSRAM：本固件从不分配 PSRAM（见 ADR「PSRAM 只显示不使用」），
+// 所以这行永远是 0.0M/8.0M——它的用途是"报告这块板子有 8MB 可用"，
+// 而不是"本程序用了多少"。
+// 总量用四舍五入到 0.1M 显示：真实值 8386295 字节算出来是 7.9M，
+// 而模块标称 8MB，显示 7.9M 会被误读成少了一块。
+static const bool PSRAM_ROW_ENABLED = true;
 
 // ------------------------------------------------------------------ 复位计数（RTC）
 // 用 RTC_NOINIT_ATTR 而非 RTC_DATA_ATTR：前者落在 .rtc_noinit（NOLOAD），

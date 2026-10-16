@@ -85,6 +85,8 @@ pages[1] = [
     draw_row("CPU", "240 MHz"),
     draw_row("RST", "USB UART"),
     draw_row("I2C", "OK 0x3C"),
+    # V1.1 新增：芯片温度，1 位小数 + 符号位按最坏情况（-40.0 C 是 7 字符）。
+    draw_row("TEMP", "36.8 C"),
 ]
 
 pages[2] = [
@@ -94,13 +96,13 @@ pages[2] = [
     draw_row_left("MAC", "12:34:56:78:9A:BC"),
     draw_row("SDK", "v4.4.7-dirty"),
     draw_row("BOOT", "%03d RST %03d" % (17, 17)),
-    # FLASH 行是本页第 6 行，也是全屏唯一一页有 6 行数据（其余各 5 行）。
-    # 它仍是全屏唯一的 5 字符标签；数值串的前导空格由 draw_row 剥掉。
-    # 分子分母取烧录后实测值：sketch 288208 B / app 分区 3342336 B。
+    # FLASH 行是全屏 5 字符标签族之一（另两个是 STACK / PSRAM）。
+    # 数值串的前导空格由 draw_row 剥掉，只是为了视觉间隔。
+    # 分子分母取烧录后实测值：sketch / app 分区 3342336 B。
     draw_row(
         "FLASH",
         " %dK/%dK %d%%"
-        % (288208 // 1024, 3342336 // 1024, 288208 * 100 // 3342336),
+        % (291664 // 1024, 3342336 // 1024, 291664 * 100 // 3342336),
     ),
 ]
 
@@ -109,16 +111,35 @@ def pct_of(part, whole):
     return part * 100 // whole if whole else 0
 
 
+def fmt_m1_round(b):
+    """一位小数的 M，带四舍五入。与 main.cpp 的 fmtM1Round 同口径。
+
+    刻意不复用 fmt_k1：那个是截断，PSRAM 真实总量 8386295 截断会得 7.9M，
+    而模块标称 8MB——这里必须复现"四舍五入"才能验证屏上真的是 8.0M。
+    """
+    tenths = (b * 10 + 524288) // 1048576
+    return "%d.%dM" % (tenths // 10, tenths % 10)
+
+
 used = HEAP_SIZE - FREE_HEAP
 frag = pct_of(HEAP_SIZE - MAX_ALLOC, HEAP_SIZE)
+# 栈：loopTask 栈 = 8192 words = 32768 bytes。
+# 水位单位是 BYTES（ESP-IDF 行为，已由反汇编坐实），已用 = 总量 - 水位。
+LOOP_STACK_BYTES = 8192 * 4
+STACK_HWM = 6368  # 烧录后实测的"最小剩余栈"（字节）
 pages[3] = [
-    # DRAM 行是"已用/总量"的分数形式，吸收了原来独立的 USED 行。
-    draw_row("DRAM", "%s/%s" % (fmt_k1(used), fmt_k1(HEAP_SIZE))),
     # FREE / MIN / MAX / FRAG 的百分比一律以 DRAM 为分母，全页同参照系。
     draw_row("FREE", fmt_k1_pct(FREE_HEAP, pct_of(FREE_HEAP, HEAP_SIZE))),
     draw_row("MIN", fmt_k1_pct(MIN_HEAP, pct_of(MIN_HEAP, HEAP_SIZE))),
     draw_row("MAX", fmt_k1_pct(MAX_ALLOC, pct_of(MAX_ALLOC, HEAP_SIZE))),
     draw_row("FRAG", "%d%%" % frag),
+    # V1.1 新增：栈已用/总量，5 字符标签（前导空格只为间隔）。
+    draw_row(
+        "STACK",
+        " %s/%s" % (fmt_k1(LOOP_STACK_BYTES - STACK_HWM), fmt_k1(LOOP_STACK_BYTES)),
+    ),
+    # V1.1：DRAM 行由首行挪到末行（它是"声明分母"，不是优先阅读的数）。
+    draw_row("DRAM", "%s/%s" % (fmt_k1(used), fmt_k1(HEAP_SIZE))),
 ]
 
 pages[4] = [
@@ -127,6 +148,12 @@ pages[4] = [
     draw_row("ADDR", "0x3C SSD1306"),
     draw_row("SCAN", "0x3C"),
     draw_row("LAST", "3 s ago"),
+    # V1.1 新增：PSRAM 已用/总量。本固件不分配 PSRAM，故恒为 0.0M/8.0M。
+    # 总量走四舍五入：8386295 截断是 7.9M，看着像少了一块。
+    draw_row(
+        "PSRAM",
+        " %s/%s" % (fmt_m1_round(8386295 - 8386051), fmt_m1_round(8386295)),
+    ),
 ]
 
 # 左对齐版的行（目前只有 MAC）：不参与右对齐断言，只检查不超列。
@@ -283,7 +310,7 @@ print("✓ README 已记录水印字样")
 # 版本号字符数 x 6 必须 < LOGO_X，否则最后一个字符会压到水印上。
 # 单独从 config.h 读 VERSION_TEXT 会变成自己验证自己，所以这里把
 # 已知的版本串写死复算——改 config.h 的值而忘了同步这里，就会报错。
-VERSION_TEXT = "V1.0"  # 与 config.h 保持一致
+VERSION_TEXT = "V1.1"  # 与 config.h 保持一致
 ver_fails = []
 ver_px = len(VERSION_TEXT) * 6
 if ver_px > LOGO_X:
