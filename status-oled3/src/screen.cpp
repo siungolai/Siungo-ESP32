@@ -271,7 +271,25 @@ void drawTitleBar(ScreenId id, const char* title, bool focused) {
   if (!s.online) {
     return;
   }
+  // Clear BEFORE the mux select, and unconditionally.
+  //
+  // clear() only zeroes this screen's own framebuffer; it touches no bus, so
+  // it has no business being behind an I2C gate. It used to sit after the
+  // select() early-return, which produced a double-exposure bug on page flips
+  // (reported 2026-10-17): a transient mux NACK made drawTitleBar() bail out
+  // before clearing, while the printKV() calls that follow each re-select the
+  // channel and can succeed. drawText5x7() ORs glyph pixels and never erases
+  // ("off pixels do not overwrite what is already there"), so the new page was
+  // painted on top of the old page's framebuffer. Two screens of text, one
+  // panel.
+  //
+  // The invariant worth keeping: if anything of this frame is drawn, the
+  // framebuffer it lands on started from zero.
+  s.oled->clear();
   if (!pca9548a::select(channelOf(id))) {
+    // Framebuffer is cleared and the body rows below still select and write
+    // their own text, so letting them paint is safe: at worst the title bar
+    // is missing for one frame, and the next tick redraws it.
     return;
   }
   // Row 0 is the title bar. Focused screens draw it inverted (all pixels on
@@ -283,7 +301,6 @@ void drawTitleBar(ScreenId id, const char* title, bool focused) {
   // is exactly the "inverted bar, invisible title" bug seen on the bench
   // (2026-10-17). drawText5x7() overwrites its glyph columns and clears the
   // inter-character gap, so it must not run over an inverted background.
-  s.oled->clear();
   s.oled->drawText5x7(2, 0, title);
   if (focused) {
     s.oled->invertPageSpan(0, OLED_WIDTH - 1, 0);
