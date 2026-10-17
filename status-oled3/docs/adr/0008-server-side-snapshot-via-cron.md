@@ -98,6 +98,22 @@ location /status/ {
 - 不让 cron 脚本在生成 JSON 时校验密钥：静态文件一旦被 `/status/` 之外的路径暴露就没救了，认证必须发生在**暴露点**上。
 - 不把密钥写进 `sites-available/photography`：该文件不在仓库里但会被频繁手改，密钥混进去等于把秘密扩散到运维最常碰的文件。密钥只出现在 root-only 的 0600 include 文件里，nginx master 以 root 读配置后才降权，读取不受影响。
 
+### 探测必须带正确的 Host 头（2026-10-17 实测）
+
+采集器探测 `svc_web` / `svc_api` / `svc_upload` 时请求的是 `https://127.0.0.1/...`，此时 `Host` 头是 `127.0.0.1`。nginx 按 `Host` 选择 server 块，`127.0.0.1` 不匹配主站的 `server_name 8.138.225.161 www.siungo.top siungo.top`，请求被路由到别的 vhost，于是即使 Go 后端本身正常应答（journalctl 里 `path=/api/photos status=200`），回到 nginx 却是 `404 page not found`。
+
+实测对照（三条同 URL、只改 Host）：
+
+| 请求 | 结果 |
+|---|---|
+| 直连 `http://127.0.0.1:8080/api/photos` | 200 |
+| `https://127.0.0.1/api/photos`（Host: 127.0.0.1） | 404 |
+| `https://127.0.0.1/api/photos` + `Host: www.siungo.top` | 200 |
+
+所以 `probe()` 统一带 `PROBE_HOST = "www.siungo.top"`。注意 `urllib.request.urlopen` 的 `headers=` 参数会被默认的 `Host` 覆盖，必须用 `Request(url, headers=...)` 构造。修正后日志从每分钟 `probe failed: svc_api=404` 变为 `fails=0`，三个 `svc_*` 全部为 1。
+
+**教训**：本机回环探测不等于「按公网身份探测」。任何经 nginx 的探针都要显式声明 `Host`，否则测的是另一个站点。
+
 ### 日志与可见性（针对 photo-cleanup.sh 的教训）
 
 `photo-cleanup.sh` 自 2026-08-31 起因数据源改名而每晚静默 `exit 1`，**34 天后才被发现**——日志看起来像「正常跑、只是没东西可删」。新脚本必须做到三条：
