@@ -287,9 +287,19 @@ void drawServerPage2() {
   // they are rendered as words. A null means the probe could not run, which
   // is not "down" -- the collector could not reach the unit, the service is
   // not necessarily stopped.
-  const char* probe_label[3] = {"web", "api", "upl"};
-  const char* probe_key[3] = {"svc_web", "svc_api", "svc_upload"};
-  for (uint8_t i = 0; i < 3; ++i) {
+  //
+  // Layout note (2026-10-17): these used to occupy rows 4, 5 and 6. Row 6 is
+  // also where drawServer() draws the page indicator, and the indicator runs
+  // AFTER this function. Because drawText5x7() ORs pixels and never erases,
+  // the indicator did not replace "upl=up" -- the two strings were merged into
+  // one unreadable smear on the second server page, every single frame.
+  // Row 7 (freshness) is out of reach for the same reason in reverse, so rows
+  // 4 and 5 are all that is left here. web and api therefore stay, and the
+  // upload probe moves into the page indicator on row 6 (see drawServer()):
+  // "pg=2/2 upl=up" is one string, drawn once.
+  const char* probe_label[2] = {"web", "api"};
+  const char* probe_key[2] = {"svc_web", "svc_api"};
+  for (uint8_t i = 0; i < 2; ++i) {
     if (!health::hasNumber(probe_key[i])) {
       screen::printKV(screen::SCREEN_SERVER, static_cast<uint8_t>(4 + i),
                       probe_label[i], "-");
@@ -339,11 +349,26 @@ void drawServer() {
 
   // Page indicator, only when there is more than one page: with one page it
   // would be a permanent, meaningless decoration.
+  //
+  // On page 2 this row also carries the upload probe. Both want row 6 and
+  // only one string fits, so they are composed into one line. The alternative
+  // -- drawing a probe and then the indicator over it -- does not overwrite:
+  // drawText5x7() ORs pixels, so the overlap rendered as both glyph sets at
+  // once (the 2026-10-17 ghosting report).
   if (screen::pageCount(screen::SCREEN_SERVER) > 1) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%u/%u A=page",
-             static_cast<unsigned>(screen::pageIndex(screen::SCREEN_SERVER) + 1),
-             static_cast<unsigned>(screen::pageCount(screen::SCREEN_SERVER)));
+    const uint8_t page_no =
+        static_cast<uint8_t>(screen::pageIndex(screen::SCREEN_SERVER) + 1);
+    const uint8_t page_n = screen::pageCount(screen::SCREEN_SERVER);
+    if (page_no == 2 && health::hasNumber("svc_upload")) {
+      snprintf(buf, sizeof(buf), "%u/%u upl=%s", static_cast<unsigned>(page_no),
+               static_cast<unsigned>(page_n),
+               health::number("svc_upload") > 0.5 ? "up" : "down");
+    } else {
+      snprintf(buf, sizeof(buf), "%u/%u A=page",
+               static_cast<unsigned>(page_no),
+               static_cast<unsigned>(page_n));
+    }
     screen::printKV(screen::SCREEN_SERVER, 6, "pg", buf);
   }
 }
