@@ -82,6 +82,10 @@ FIELDS = [
     "cert_days",
 ]
 
+# Host header for every 127.0.0.1 probe. Must be a name the main vhost answers
+# to, or nginx routes the request to another server block (see probe()).
+PROBE_HOST = "www.siungo.top"
+
 
 def log(msg):
     """Append one line to the log.
@@ -210,12 +214,21 @@ def probe(url, timeout=5):
     Goes to 127.0.0.1 where nginx listens, with certificate verification off:
     this asks "is the stack serving", and a self-signed-looking local cert is
     not what is being measured (docs/adr/0009 consequence 3).
+
+    The Host header MUST be the real vhost name. Requesting
+    https://127.0.0.1/api/photos sends `Host: 127.0.0.1`, which nginx routes to
+    a different server block than the main site -- the request reaches the Go
+    backend, the backend answers 200, but the response comes back as
+    `404 page not found` because it was resolved against the wrong vhost
+    (measured 2026-10-17: same URL with `Host: www.siungo.top` returns 200).
+    Pinning it here keeps the probe measuring what it claims to measure.
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, headers={"Host": PROBE_HOST})
     try:
-        with urllib.request.urlopen(url, timeout=timeout, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             return resp.status
     except urllib.error.HTTPError as exc:
         return exc.code
