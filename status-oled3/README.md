@@ -150,6 +150,8 @@ focused screen     : ESP32
 - [`GLOSSARY.md`](GLOSSARY.md) — 本项目术语表
 - [`docs/adr/`](docs/adr/) — 决策记录（ADR-0001 ~ ADR-0012，其中 [ADR-0005](docs/adr/0005-aggregator-as-standalone-service-with-shared-secret.md) 已被否决并由 ADR-0008 取代）
 - [`tools/i2c-probe/`](tools/i2c-probe/) — 总线诊断固件（I2C 扫描 + 线路完整性 + SDA/SCL 对调判别）
+- [`tools/check-row-overlap.py`](tools/check-row-overlap.py) — 屏幕排版静态检查：同一屏同一帧内，任何一行不得被两段文字写入（`drawText5x7` 是 OR 写入，撞行会叠成重影）。`python tools/check-row-overlap.py`
+- [`tools/check-row-overlap-selftest.py`](tools/check-row-overlap-selftest.py) — 上面那个检查器的自检：喂进已知的坏排版，断言它确实报错。改了检查器就跑一次 `python tools/check-row-overlap-selftest.py`
 - [`docs/server/`](docs/server/) — M1b 服务器侧产物（脱敏模板，密钥一律 `<MONITOR_KEY>` 占位）
 
 ### M1b 设备侧实现要点（已编译，未上板）
