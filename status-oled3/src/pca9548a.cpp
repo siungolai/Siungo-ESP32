@@ -32,6 +32,17 @@ bool begin() {
   Wire.begin(config::I2C_SDA_PIN, config::I2C_SCL_PIN, config::I2C_HZ);
   Wire.setTimeOut(config::I2C_TIMEOUT_MS);
 
+  // Single-screen-direct topology (bench reality 2026-10-17, see the topology
+  // note in config.h): there is no mux in the signal path, so probing one
+  // would be a pointless upstream transaction and, worse, would make the
+  // boot report claim a mux is "absent" while the screen behind it works
+  // fine. The bus is still initialised above, because the screen rides it.
+  if (config::ACTIVE_SCREENS <= 1) {
+    g_ready = false;       // no mux to talk to, so "ready" is false
+    g_current = kNoChannel;  // and no channel is selected
+    return false;            // begin() means "the mux is up": it is not
+  }
+
   Wire.beginTransmission(config::PCA9548A_ADDR);
   g_lastError = Wire.endTransmission();
   g_ready = (g_lastError == 0);
@@ -40,6 +51,8 @@ bool begin() {
 }
 
 bool ready() { return g_ready; }
+
+bool isDirect() { return config::ACTIVE_SCREENS <= 1; }
 
 uint8_t currentChannel() { return g_current; }
 
@@ -51,7 +64,13 @@ bool select(uint8_t channel) {
                    // that selects the wrong channel
   }
   if (!g_ready) {
-    return false;  // mux offline; a write would not reach anywhere anyway
+    // Two different reasons land here, and only one is a fault:
+    //   ACTIVE_SCREENS <= 1 -> there is no mux to talk to, the bus already
+    //                          reaches the screen directly. That is success.
+    //   mux present but offline -> downstream cannot work, a real failure.
+    // The caller cannot tell them apart from this return value alone, which
+    // is why screen.cpp asks isDirect() before treating this as an error.
+    return config::ACTIVE_SCREENS > 1 ? false : true;
   }
   if (g_current == channel) {
     return true;  // already selected: no-op, saves one upstream transaction

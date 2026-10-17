@@ -29,7 +29,7 @@
 
 1. **免掉阿里云 OpenAPI 的整套机制**：CloudMonitor 需要 AccessKeyId/AccessKeySecret、HMAC-SHA1 签名、按实例 ID 查指标——对一个只显示四个数字的屏幕是严重过度设计，且密钥要烧进 ESP32 flash，泄露面从一台服务器扩大到一块随身设备
 2. **"服务器自身状态"用本机 `/proc` 读最准最快**，不受云 API 的采集粒度（通常 1 分钟）与配额限制；本机脚本读 `/proc/stat`、`/proc/meminfo`、`df` 是零依赖的
-3. **邮箱凭据只存在于服务器一处**：用户现有后端已有 SMTP 凭据管理先例——`W:\Github\Siungo-Website\Code\server` 的告警通道，凭据落在 `DataDir/email.json`（`authUser` / `authPassword`，原子写 0600，读取时掩码为 `********`）。集中在一处比分散到固件里更安全，轮换授权码也不用重新烧录
+3. **邮箱凭据只存在于服务器一处**：用户现有后端已有 SMTP 凭据管理先例——`W:\Github\Siungo-Website\Code\server` 的告警通道，凭据落在 `DataDir/email.json`（`authUser` / `authPassword`，原子写 0600，读取时掩码为 `********`）。集中在一处比分散到固件里更安全，轮换授权码也不用重新烧录。**新增的 IMAP 授权码不得沿用 `.doc/deploy-secrets.txt` 那种明文模式**（该文件已在盘上存有 `MONITOR_KEY` 与 `ADMIN_PASSWORD`），只走 0600 配置文件，见 [ADR-0008](0008-server-side-snapshot-via-cron.md)
 4. **设备侧实现量最小**：一个 `HTTPClient` + JSON 解析，没有 TLS 双向认证、没有签名、没有 OAuth 刷新
 5. **"服务器挂了"本身变成可观测事件**：数据停更即掉线，屏上显示最后更新时间（见 [ADR-0004](0004-fixed-server-polling-and-staleness.md)），这比任何探针都更贴近用户真实关心的那句话——"我的服务器还活着吗"
 
@@ -49,7 +49,7 @@
 
 **服务器侧采集、设备侧只轮询一个 JSON 端点。** 聚合端点读取本机指标与各邮箱未读数，ESP32 通过 HTTPS 定时 GET；设备不持有任何服务端凭据。
 
-聚合端点的**部署形态**已于 [ADR-0005](0005-aggregator-as-standalone-service-with-shared-secret.md) 决定：独立小服务 + 独立 systemd unit + nginx 反代，与主站 Go 后端解耦。理由与既有先例见该文件。
+聚合端点的**部署形态**最初于 [ADR-0005](0005-aggregator-as-standalone-service-with-shared-secret.md) 决定为「独立小服务 + 独立 systemd unit + nginx 反代」，**该方案已于 2026-10-16 被用户否决**。当前形态见 [ADR-0008](0008-server-side-snapshot-via-cron.md)：cron 每分钟生成静态 JSON + nginx 直接伺服，零常驻进程、零编译。设备侧先接主站现成的 `/api/health` 打通链路（[ADR-0009](0009-phase-in-with-existing-health-endpoint.md)）。
 
 ## 后果
 
@@ -70,4 +70,5 @@
 
 - 本决策与 `pet-oled3` 的 [ADR-0004](../pet-oled3/docs/adr/0004-uptime-only-time-progression.md)（不联网）不冲突：那条决策的适用范围是掌上宠物单机玩法，其备注已声明"仅对 pet-oled3 生效"。本项目需要外网数据，按 [`../HARDWARE.md`](../HARDWARE.md) §9 的实测代价重新评估即可
 - 若未来要把聚合端点挪去第二台机器，本决策的方向不变，只换设备轮询的地址（[ADR-0006](0006-aggregator-url-pinning.md) 的一个常量）——这是刻意保留的退路
-- **"设备不持有任何服务端凭据"**的准确边界：不持有**服务端侧**的凭据（IMAP 授权码、阿里云 AccessKey、数据库口令等）。WiFi 自身的 SSID/密码与轮询用的共享密钥是设备侧凭据，先例见 `clock-oled/src/secrets.h`，见 [ADR-0005](0005-aggregator-as-standalone-service-with-shared-secret.md)
+- **"设备不持有任何服务端凭据"**的准确边界：不持有**服务端侧**的凭据（IMAP 授权码、阿里云 AccessKey、数据库口令等）。WiFi 自身的 SSID/密码与轮询用的共享密钥（`X-Monitor-Key`，M1b 起）是设备侧凭据，先例见 `clock-oled/src/secrets.h`；共享密钥的分发与存放见 [ADR-0008](0008-server-side-snapshot-via-cron.md) 与 [ADR-0006](0006-aggregator-url-pinning.md)
+- 停更判定用设备本地单调时钟而非服务器 `timestamp`，见 [ADR-0004](0004-fixed-server-polling-and-staleness.md) 的修订

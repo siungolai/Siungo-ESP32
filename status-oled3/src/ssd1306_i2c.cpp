@@ -355,6 +355,16 @@ void Ssd1306I2c::fillPageSpan(uint8_t x0, uint8_t x1, uint8_t page,
   }
 }
 
+void Ssd1306I2c::invertPageSpan(uint8_t x0, uint8_t x1, uint8_t page) {
+  if (page >= OLED_PAGES || x0 > x1) {
+    return;
+  }
+  uint8_t* row = buf_ + static_cast<size_t>(page) * OLED_WIDTH;
+  for (uint8_t x = x0; x <= x1 && x < OLED_WIDTH; ++x) {
+    row[x] = static_cast<uint8_t>(row[x] ^ 0xFF);
+  }
+}
+
 // ------------------------------------------------------------------ Chinese
 //
 // A Chinese glyph is 16 pixels tall and must be able to land on any pixel
