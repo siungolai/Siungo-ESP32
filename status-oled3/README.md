@@ -209,6 +209,7 @@ focused screen     : ESP32
 | `status-check.py` 门禁 | `OK ... 19 fields` + `OK ... 5 fields`，exit 0 |
 | cron 自动刷新 | snapshot 每分钟刷新（实测 mtime 22:08:01） |
 | 设备串口 | `[poll] snapshot ok polls=16/17/18`，无解析失败 |
+| 邮箱 IMAP | `available=1 unread=41`，设备 `[poll] mailbox ok available=1 unread=41` |
 
 `src/secrets.h` 的 `MONITOR_KEY` 已填入主站真值（44 字符，**不进 git**）。
 

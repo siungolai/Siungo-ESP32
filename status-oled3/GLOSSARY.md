@@ -109,7 +109,7 @@ _Avoid_: 阶段一、第一阶段、phase 0
 
 **M1（数据链路）**：
 服务器侧以 cron + 静态 JSON 产出指标快照（[ADR-0008](docs/adr/0008-server-side-snapshot-via-cron.md)），设备侧先接主站现成的 `/api/health` 打通 HTTPS 与停更判定（[ADR-0009](docs/adr/0009-phase-in-with-existing-health-endpoint.md)），再切到快照端点（[ADR-0004](docs/adr/0004-fixed-server-polling-and-staleness.md)）。邮箱先接 1 个测试账号，每 5 分钟由独立 cron 拉取，汇总为未读总数。**M1 的服务器侧部署以 M0 链路通为前提**——链路不通时先做设备侧代码。
-**当前状态（2026-10-17）**：**M1 全线打通并已上线**。M1a（设备侧链路）早前上板实测通过；M1b 的服务器侧（cron 每分钟产 snapshot、每 5 分钟产 mailbox、nginx `/status/` 带密钥鉴权）已部署到阿里云主机，设备侧固件已切换 `DATA_PATH=/status/snapshot.json` 并持续取数。实测：无密钥/错密钥 403、正确密钥 200、白名单外 403，`status-check.py` 门禁 exit 0，串口 `[poll] snapshot ok` 连续递增。邮箱侧因尚未配置 IMAP 凭据，`mailbox.json` 为 `available:0 / unread:null` 的合法文档（屏幕显示「未配置」而非「0 未读」）。
+**当前状态（2026-10-17）**：**M1 全线打通并已上线**。M1a（设备侧链路）早前上板实测通过；M1b 的服务器侧（cron 每分钟产 snapshot、每 5 分钟产 mailbox、nginx `/status/` 带密钥鉴权）已部署到阿里云主机，设备侧固件已切换 `DATA_PATH=/status/snapshot.json` 并持续取数。实测：无密钥/错密钥 403、正确密钥 200、白名单外 403，`status-check.py` 门禁 exit 0，串口 `[poll] snapshot ok` 与 `[poll] mailbox ok available=1 unread=41` 连续递增。邮箱侧已配置阿里云企业邮 IMAP（`imap.qiye.aliyun.com:993`，凭据在服务器 `/etc/status-monitor-imap.json`，root:root 0600，不进 git）。
 _Avoid_: 阶段二、联调
 
 **M2（完整界面）**：
