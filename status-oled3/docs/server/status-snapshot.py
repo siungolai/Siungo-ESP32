@@ -46,11 +46,14 @@ is 1/0 for that reason.
 """
 
 import argparse
+import calendar
 import json
 import os
 import shutil
+import socket
 import ssl
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
@@ -243,18 +246,38 @@ def cert_days_left():
     (W:\\Github\\Siungo-Website\\README.md:610-679) and the site once served an
     expired one for 17 days. Putting the number on the screen turns that risk
     into something visible instead of a surprise.
+
+    Reads the certificate over a LOCAL TLS handshake, not
+    ssl.get_server_certificate(): that helper hands the PEM to
+    _test_decode_cert(), which only accepts a PATH and raises
+    SSLError("Can't open file") on a string. Measured 2026-10-17 -- cert_days
+    was null for exactly this reason.
+
+    Parsing notAfter: the string ends in " GMT", so the epoch value is
+    calendar.timegm(), NOT time.mktime(). mktime() reads the tuple as LOCAL
+    time, which on this box (UTC+8) would report 8 hours less than the truth --
+    harmless at day granularity, but wrong, and it would silently drift near
+    the expiry boundary where the number actually matters.
     """
     try:
-        pem = ssl.get_server_certificate(("www.siungo.top", 443))
-    except Exception:
-        return None
-    try:
-        decoded = ssl._ssl._test_decode_cert(pem)  # noqa: SLF001
-    except Exception:
-        return None
-    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with socket.create_connection(("127.0.0.1", 443), timeout=10) as raw:
+            with ctx.wrap_socket(raw, server_hostname="www.siungo.top") as tls:
+                der = tls.getpeercert(binary_form=True)
+        if not der:
+            return None
+        # Decode through a temp file: _test_decode_cert takes a path only.
+        with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as fh:
+            fh.write(ssl.DER_cert_to_PEM_cert(der))
+            pem_path = fh.name
+        try:
+            decoded = ssl._ssl._test_decode_cert(pem_path)  # noqa: SLF001
+        finally:
+            os.unlink(pem_path)
         not_after = decoded["notAfter"]  # e.g. 'Dec 22 20:00:54 2026 GMT'
-        end = time.mktime(time.strptime(not_after, "%b %d %H:%M:%S %Y %Z"))
+        end = calendar.timegm(time.strptime(not_after, "%b %d %H:%M:%S %Y %Z"))
         return int((end - time.time()) // 86400)
     except Exception:
         return None
