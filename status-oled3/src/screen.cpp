@@ -37,11 +37,18 @@ struct ScreenEntry {
 
 ScreenEntry g_screens[SCREEN_COUNT];
 
-// The three driver instances. Static storage, so no allocation ever happens
-// on the heap after boot. All three share the same pins and the same 0x3C
-// address; the only difference between them is which mux channel gets
-// selected before they touch the bus (see channelOf()). The Ssd1306I2c
-// constructor does not touch the bus, so building three is free.
+// The logical screen currently taking over the shared panel. Only meaningful
+// in the single-screen topology; with one panel per screen it is simply the
+// screen the user last focused and has no visible effect.
+ScreenId g_focused = SCREEN_LOCAL;
+
+// The driver instances. Static storage, so no allocation ever happens on the
+// heap after boot. All share the same pins and the same 0x3C address; the
+// only difference between them is which mux channel gets selected before
+// they touch the bus (see channelOf()), and in the single-screen topology
+// no channel is selected at all because the panel is on the bus directly.
+// The Ssd1306I2c constructor does not touch the bus, so building three is
+// free.
 Ssd1306I2c g_drivers[SCREEN_COUNT] = {
     Ssd1306I2c(config::I2C_SCL_PIN, config::I2C_SDA_PIN, config::SSD1306_ADDR,
                config::I2C_HZ),
@@ -66,9 +73,16 @@ bool validId(ScreenId id) {
   return static_cast<uint8_t>(id) < SCREEN_COUNT;
 }
 
+// Bring up the panel in the single-screen topology: no channel to select,
+// because the panel hangs off the upstream pins directly.
+bool bringUpDirect() { return g_drivers[0].begin(); }
+
 // Bring the given screen's driver up on its own channel.
 // Selects and deselects the channel itself; caller must not hold it.
 bool bringUp(ScreenId id) {
+  if (pca9548a::isDirect()) {
+    return bringUpDirect();  // no mux: the panel is on the bus already
+  }
   const uint8_t ch = channelOf(id);
   if (!pca9548a::select(ch)) {
     return false;  // mux offline (or write failed): nothing downstream works
@@ -84,7 +98,24 @@ void begin() {
   // The mux must come up first: every screen probe rides it.
   // When the mux itself is absent, all three screens stay offline, and the
   // serial report below is the whole diagnosis.
+  //
+  // Single-screen topology: the mux is not in the path, so begin() is only
+  // needed for the bus initialisation it performs (Wire.begin + timeout).
+  // pca9548a::begin() returns false there, and that is not a fault.
   pca9548a::begin();
+
+  if (pca9548a::isDirect()) {
+    // One probe covers all three logical screens: they share the one panel.
+    const bool ok = bringUpDirect();
+    for (uint8_t i = 0; i < SCREEN_COUNT; ++i) {
+      g_screens[i].oled = &g_drivers[i];
+      g_screens[i].online = ok;
+      g_screens[i].dirty = true;
+      g_screens[i].page.index = 0;
+      g_screens[i].page.count = 1;
+    }
+    return;
+  }
 
   for (uint8_t i = 0; i < SCREEN_COUNT; ++i) {
     g_screens[i].oled = &g_drivers[i];
@@ -95,10 +126,38 @@ void begin() {
   }
 }
 
+// Record which logical screen owns the shared panel (single-screen topology).
+// Called by main.cpp when focus changes, so the next render paints it.
+void setFocused(ScreenId id) {
+  if (!validId(id)) {
+    return;
+  }
+  g_focused = id;
+}
+
 void rescan() {
   // Only channels previously reported offline are re-probed, so the steady
   // state costs zero upstream traffic. A screen that just got plugged in is
   // picked up within one rescan cycle.
+  //
+  // Single-screen topology: all three logical screens map onto the ONE panel,
+  // so one probe covers all of them. There is nothing else to wait for, and
+  // re-probing the same channel three times would be three identical
+  // transactions that can only disagree with each other.
+  if (pca9548a::isDirect()) {
+    const bool ok = bringUpDirect();
+    for (uint8_t i = 0; i < SCREEN_COUNT; ++i) {
+      if (g_screens[i].online == ok) {
+        continue;
+      }
+      g_screens[i].online = ok;
+      if (ok) {
+        g_screens[i].dirty = true;  // it is back: redraw it fully
+      }
+    }
+    return;
+  }
+
   for (uint8_t i = 0; i < SCREEN_COUNT; ++i) {
     if (g_screens[i].online) {
       continue;
@@ -108,6 +167,41 @@ void rescan() {
       g_screens[i].dirty = true;  // it is back: redraw it fully
     }
   }
+}
+
+bool showable(ScreenId id) {
+  if (!validId(id)) {
+    return false;
+  }
+  if (!g_screens[static_cast<uint8_t>(id)].online) {
+    return false;  // absent panel: nothing to paint on
+  }
+  // One panel cannot show three screens at once. Only the focused one is
+  // showable, and it is the caller's job to route focus changes through
+  // showFocused() so this panel actually repaints.
+  if (PHYSICAL_COUNT <= 1) {
+    return id == g_focused;
+  }
+  return true;
+}
+
+void showFocused() {
+  // One panel, many logical screens: the focused one takes over the panel.
+  // The previously visible one is not "cleared" -- it is simply no longer
+  // painted, and the next showFocused() on it overwrites the panel fully
+  // (every draw* path starts with drawTitleBar(), which calls clear()).
+  if (PHYSICAL_COUNT > 1) {
+    return;
+  }
+  if (g_focused >= SCREEN_COUNT) {
+    return;
+  }
+  if (!g_screens[g_focused].online) {
+    return;
+  }
+  // Force a repaint of the newly visible screen and hide the stale content of
+  // the other two from the panel: mark them clean so nothing pushes them.
+  g_screens[g_focused].dirty = true;
 }
 
 bool online(ScreenId id) {
@@ -183,11 +277,17 @@ void drawTitleBar(ScreenId id, const char* title, bool focused) {
   // Row 0 is the title bar. Focused screens draw it inverted (all pixels on
   // with the text knocked out), the cheapest "this screen is focused" marker
   // that survives a glance from across the desk.
+  //
+  // Order matters: draw the text FIRST, then invert the whole row. Inverting
+  // first and drawing the text second would paint the glyph pixels ON, which
+  // is exactly the "inverted bar, invisible title" bug seen on the bench
+  // (2026-10-17). drawText5x7() overwrites its glyph columns and clears the
+  // inter-character gap, so it must not run over an inverted background.
   s.oled->clear();
-  if (focused) {
-    s.oled->fillPageSpan(0, OLED_WIDTH - 1, 0, 0xFF);
-  }
   s.oled->drawText5x7(2, 0, title);
+  if (focused) {
+    s.oled->invertPageSpan(0, OLED_WIDTH - 1, 0);
+  }
   pca9548a::deselectAll();
   s.dirty = true;
 }

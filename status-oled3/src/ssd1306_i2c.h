@@ -83,6 +83,12 @@ class Ssd1306I2c {
   void drawText5x7Scaled2x(uint8_t x, uint8_t page, const char* s);
   void drawText5x7Scaled2xY(uint8_t x, uint8_t y, const char* s);
   void fillPageSpan(uint8_t x0, uint8_t x1, uint8_t page, uint8_t pattern);
+  // Flip every pixel in the span (XOR with 0xFF). Used to knock text out of
+  // an inverted title bar: draw the text first, then invert, so the glyph
+  // pixels go dark and the background stays lit. Filling with 0xFF first and
+  // drawing the text afterwards would erase the glyphs instead -- see
+  // screen::drawTitleBar().
+  void invertPageSpan(uint8_t x0, uint8_t x1, uint8_t page);
 
   // ---- Chinese (16x16 bitmap, 16 columns wide, 16 rows tall) ----
   // A glyph missing from the table draws a box placeholder, making a

@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 
+#include "config.h"
 #include "pca9548a.h"
 #include "ssd1306_i2c.h"
 
@@ -33,6 +34,22 @@ enum ScreenId : uint8_t {
 
 // How many logical screens exist. Used by loops that iterate all of them.
 constexpr uint8_t SCREEN_COUNT = 3;
+
+// Physical panels actually wired (config::ACTIVE_SCREENS).
+//   > 1 -> mux in the signal path; every logical screen owns its own panel
+//          and a channel, and all three are painted at once (docs/adr/0001)
+//   1   -> no mux; all logical screens share ONE panel and the caller paints
+//          only the focused one. showable() expresses that.
+constexpr uint8_t PHYSICAL_COUNT = config::ACTIVE_SCREENS;
+
+// Whether this screen is currently visible. With three panels every screen is
+// visible; with one panel only the focused one is. Callers must use this
+// instead of online() when deciding what to paint.
+bool showable(ScreenId id);
+
+// Paint the focused screen onto the shared panel (single-screen topology).
+// No-op when PHYSICAL_COUNT > 1: each screen already owns a panel.
+void showFocused();
 
 // Current page of one screen. A page is one "screenful" of content; pages of
 // the same screen show the same kind of information (GLOSSARY.md "page").
@@ -96,8 +113,15 @@ uint8_t pageCount(ScreenId id);
 // count < 1 is treated as 1 (a screen with no pages is not a usable state).
 void nextPage(ScreenId id);
 
-// Direct framebuffer access (for the title bar inversion and the pending
-// data-arrival splash). Returns nullptr when the screen is offline.
-uint8_t* framebuffer(ScreenId id);
+// Which logical screen owns the shared panel in the single-screen topology.
+// main.cpp calls this whenever focus changes so the panel repaints.
+void setFocused(ScreenId id);
+
+// The title-bar inversion for the focused screen goes through
+// Ssd1306I2c::invertPageSpan: drawTitleBar() draws the title first and inverts
+// the row afterwards, so the glyph pixels end up dark on a lit bar. Filling the
+// row with 0xFF and then drawing the text (the original mistake) leaves the
+// text invisible. There is no raw framebuffer accessor on purpose: it would
+// let a caller draw outside the online/dirty bookkeeping.
 
 }  // namespace screen

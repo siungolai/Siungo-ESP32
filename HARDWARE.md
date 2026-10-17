@@ -45,8 +45,9 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 |---|---|---|
 | GPIO 1 / GPIO 2 | **I2C 禁接** | 实测全段超时，见 [§6.1](#61-gpio-1--gpio-2-上-i2c-完全不通实测) |
 | GPIO 19 / GPIO 20 | **禁占** | 原生 USB D+/D-（USB-Serial-JTAG），占用即失去板载串口下载，见 [§1.1](#11-板级参数) |
-| GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled) |
-| GPIO 7 | **按项目分角色，同一时间只插一个**：`dht11-oled` 的 DHT11 数据脚 / `status-oled` 的翻页按钮 | 两者不能同时插——DHT11 模块自带 4.7k~10k 上拉，会与按钮要用的内部上拉并联，见 [§5.3](#53-接线dht11) |
+| GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled)。**`status-oled3` 实测接在 4/5 上**（PCA9548A 上游，见 §4.5） |
+| GPIO 6 / GPIO 7 | **按项目分角色，同一时间只插一个**：GPIO 6 = `status-oled3` 按钮 A（翻页，2026-10-16 实测）/ GPIO 7 = `dht11-oled` 的 DHT11 数据脚 / `status-oled3` 的按钮 B（换聚焦屏） | GPIO 7 上两者不能同时插——DHT11 模块自带 4.7k~10k 上拉，会与按钮要用的内部上拉并联，见 [§5.3](#53-接线dht11) |
+| GPIO 21 | `status-oled3` 有源蜂鸣器（2026-10-16 实测） | 初版规划 GPIO 12，因 MTDI strapping 避开而改 |
 | GPIO 26–32 | SPI0/1，封装内 Flash/PSRAM 已占 | 规格已核实，不推荐他用 |
 | GPIO 33–37 | 8 线 SPI 高位数据线 | 本板 OPI PSRAM 已占用 |
 | GPIO 38 | 规划中：编码器按键 | 待 bringup 验证 |
@@ -504,12 +505,24 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 
 | PCA9548A 排针 | ESP32-S3 | 说明 |
 |---|---|---|
-| **SDA** | **GPIO 8** | 建议值，待 bringup 实测确认 |
-| **SCL** | **GPIO 9** | 同上 |
+| **SDA** | **GPIO 5** | **2026-10-17 `status-oled3` bench 实测值**。GPIO4/5 是 §2.3 记录的本机实测跑通 I2C 脚位，但**线序与初版策划案相反**：实物是 GPIO5→模块 SDA、GPIO4→模块 SCL |
+| **SCL** | **GPIO 4** | 同上 |
 | VCC | 3V3 | 模块支持 1.65–5.5 V |
 | GND | GND | |
-| A0 / A1 / A2 | GND（跳线） | 目标地址 **0x70**，**以实际扫描结果为准**。地址表：LLL=0x70 / LLH=0x71 / LHL=0x72 / LHH=0x73 / HLL=0x74 / HLH=0x75 / HHL=0x76 / HHH=0x77 |
-| RESET | 3V3 或悬空 | active-low；多数模块已内部上拉。bringup 阶段先悬空 |
+| A0 / A1 / A2 | GND（跳线） | 目标地址 **0x70**，**2026-10-17 已由 v7 探针单点 ACK 证实**。地址表：LLL=0x70 / LLH=0x71 / LHL=0x72 / LHH=0x73 / HLL=0x74 / HLH=0x75 / HHL=0x76 / HHH=0x77 |
+| RESET | 3V3 或悬空 | active-low；多数模块已内部上拉。`status-oled3` bench 接 GPIO8 实测：`as found=HIGH`，驱动低再释放不改变结果 |
+
+> **✅ 2026-10-17 结案：`0x70` 无应答的根因是 SDA/SCL 交叉。** 实物接线是 **GPIO4 → 模块 SCL、GPIO5 → 模块 SDA**（用户回报原文「g4连scl;g5连sda」），而固件最初写 `I2C_SDA_PIN=4 / I2C_SCL_PIN=5`，两线在实物与固件之间交叉。I2C 的 START/STOP/ACK 全定义在「SDA 相对 SCL 的边沿」上，互换后从机永远识别不出 START。
+>
+> **为什么电气指标全是正常的**：两线都有上拉、都在带电的轨上，所以 `idle` 读 HIGH/HIGH、ADC 3152mV、全段 `nack_addr` 且 `timeout=0`——**这些指标与线序无关，不能用来排除线序问题**。此前据此判「模块坏」，判错了。
+>
+> **破案证据（i2c-probe v7，三趟各自独立 `Wire.end()`）**：A1 空总线 GPIO10/11（对照）全段 NACK；**A2 `SDA=GPIO5 SCL=GPIO4`（匹配实物）→ `0x70` ACK**；A3 `SDA=GPIO4 SCL=GPIO5`（固件原状）全段 NACK。修复 = `config.h` 改 `I2C_SDA_PIN=5 / I2C_SCL_PIN=4`，改完 boot report `pca9548a 0x70 : online` + ch0/ch1/ch2 三屏全 online。
+>
+> **为什么查了 36 小时（教训）**：之前每一版探针都有「SDA/SCL 对调」pass，但**全都是假的**——缺 `Wire.end()`，框架 `Wire.cpp:300-303` 的 `begin()` 在 `i2cIsInit(num)` 为真时直接跳到函数尾返回 true，**从不调用 `initPins()`**（`Wire.cpp:118-144` 的 `setPins()` 同理只打 `log_e`），第二次 `Wire.begin()` 同脚位是彻底 no-op，对调 pass 实际还在扫 GPIO4/GPIO5，这就是它们输出逐字一样的原因。同一根因还让 v4 报出假的「全段 error 5 + 100kHz 挂死」，当时误判为「ADC 段干扰」。**在本框架里换脚位或重新初始化 I2C，必须先 `Wire.end()` 再 `Wire.begin()`，缺一不可。**
+>
+> **已排除（不要再查）**：地址跳线（0x08–0x77 全段扫过，覆盖 A0/A1/A2 全部 8 种组合）、总线速度（100k/400k 一致）、SDA/SCL 被外部拉死、SDA/SCL 互相短接、模块被按住复位（RST 接 GPIO8，驱动低再释放无效，`as found=HIGH`）、上拉缺失、ESP32 I2C 外设坏（空总线对照）、HARDWARE.md §6.1 同型故障（那是 GPIO1/2 全段 error 5）。完整排查史见 `status-oled3/.doc/i2c-absent-investigation-2026-10-17.md`（过程产物，已 gitignore）。
+>
+> **`status-oled3` 顺带证明了单屏直连拓扑也可用**：`config::ACTIVE_SCREENS` 一个常量切拓扑（1 = 无复用器、一块面板直连 GPIO4/5、三逻辑屏共用；3 = 复用器在链路、每屏一通道一面板）。当前 bench 为 3。
 
 A0 = pin22、A1 = pin23、A2 = pin18，各自直连 VCC 或 GND；RESET = pin24，不用时经上拉接 VCC。
 
@@ -541,13 +554,17 @@ A0 = pin22、A1 = pin23、A2 = pin18，各自直连 VCC 或 GND；RESET = pin24�
 
 ### 4.8 待本机验证（bringup 必做）
 
-- [ ] 扫描 0x70–0x77，确认 PCA9548A **实际地址**（跳线可能焊死，不一定 0x70）
-- [ ] 万用表量各通道 SDA/SCL 对 VCC 阻值，确认模块上拉**挂在上游还是八路全挂**
-- [ ] 逐通道探测 0x3C，确认三块屏都能被找到
-- [ ] **三块屏显示不同内容**（同内容无法区分是否真的切换成功）
-- [ ] 记录 `endTransmission()` 是否返回 5（超时）
-- [ ] 确认 GPIO 8 / GPIO 9 作上游 SDA / SCL 在本机可用
-- [ ] 验证「选通在一次完整事务的 STOP 之后才生效」（见 [§4.2](#42-控制寄存器的三个实现细节)）
+- [x] 扫描 0x70–0x77，确认 PCA9548A **实际地址** —— 已完成（2026-10-17 v7 探针）：`SDA=GPIO5 SCL=GPIO4` 时 **`0x70 -> ACK`**，地址确认为 0x70（A0/A1/A2 全接地）。此前全段 0 ACK 是因为线序交叉，不是地址错
+- [x] **空总线对照（2026-10-17 v6）** —— GPIO10/GPIO11 本项目无接线，作空总线对照：`idle` 读 LOW/LOW、全段 `nack_addr=112 timeout=0`、完整跑完 112 个事务。⟹ ESP32 I2C 外设与固件配置正常，模块总线的故障不能归因于板子或内核
+- [~] 万用表量各通道 SDA/SCL 对 VCC 阻值，确认模块上拉**挂在上游还是八路全挂** —— 未用万用表做（用户无万用表）；已用 ADC 侧面证明上拉接着带电的轨（SDA/SCL 均 3152mV，RESET 拉低时不变）。上游/八路的区分对驱动无影响：`pca9548a::select()` 一次只选一路（ADR-0001），不依赖上拉归属
+- [x] 逐通道探测 0x3C，确认三块屏都能被找到 —— 已完成（2026-10-17）：ch0/ch1/ch2 **三块屏全部 online**，boot report 逐行确认
+- [x] **三块屏显示不同内容**（同内容无法区分是否真的切换成功）—— 已完成（2026-10-17）：三屏各显各的内容，且**字无上下镜像**（`0xC8` COM 扫描反向正确，`fontDirProbe()` 自检通过）
+- [x] 记录 `endTransmission()` 是否返回 5（超时）—— 已完成：**不返回 5**，全段 `timeout=0`。（v4 曾报假的 error 5，根因是探针缺 `Wire.end()`，见 §4.5 教训）
+- [x] 确认上游 SDA / SCL 脚位在本机可用 —— **口径订正（2026-10-17）**：实测 **SDA=GPIO5 / SCL=GPIO4**（与初版策划案的 GPIO8/9 及固件最初的 4/5 都不同）。GPIO4/5 可用性由 §2.3 既有实测确认；GPIO8 改接 PCA9548A RST
+- [x] 验证「选通在一次完整事务的 STOP 之后才生效」（见 [§4.2](#42-控制寄存器的三个实现细节)）—— 已完成（2026-10-17，反证法）：三块屏同时在线且各显各的内容。若选通/断开时序错，三块 0x3C 会互相抢占同一通道而表现为「内容错乱 / 只有一块亮」，实测无此现象
+
+> ✅ **§4.8 七项全部完成（2026-10-17）。** 本节标题可从「待本机验证」改为「已验证」。
+> 根因与教训见 §4.5 的结案块；实现签名见 `status-oled3/src/pca9548a.h`。
 
 > 完成后回写本节：把「规格已核实」改为「实测可用」，并把 [§4.7](#47-规划中的驱动接口尚未实现) 的规划接口替换为实现签名。
 > 项目背景与完整接线表见 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md) 的 M0 里程碑。

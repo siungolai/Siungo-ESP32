@@ -4,7 +4,9 @@
 
 ## 状态
 
-已接受
+**已被用户否决，由 [ADR-0008](0008-server-side-snapshot-via-cron.md) 取代**（否决记录见下文「背景」末段与「备注」）
+
+> 本文件保留原文作为决策历史，不代表当前部署形态。当前形态见 ADR-0008：cron 每分钟生成静态 JSON + nginx 直接伺服，零常驻进程、零编译。
 
 ## 背景
 
@@ -73,7 +75,8 @@
 
 ## 备注
 
-- 端口选择：8080（主站）、8089（token-cost）、18099（干跑段）已占用，本机监听端口取 **127.0.0.1:8090**，M1 部署时确认。设备侧的引脚口径另见 [ADR-0007](0007-gpio-assignment-buttons-and-buzzer.md)（GPIO 10/11/12 已定，与端口号无关）
-- nginx 侧若只加 `location /api/status/` 而不动 server 级 `add_header`，要注意 **`add_header` 是替换语义不是合并**——新 location 若需要安全头，必须把 6 个头全部重写一遍，否则会静默丢掉 HSTS 等头
+- **否决记录（2026-10-16）**：用户在讨论后续开发计划时明确否决本方案——原话「我没计划单独放go服务到阿里云上」。否决的实质理由是「常驻进程产分钟级数据 = 重武器打蚊子」：这台机器已有四个 cron + bash + python3 的数据生产任务（`photo-monitor.sh` 每 5 分钟、`sqlite-backup.sh` 每天 04:00、`photo-cleanup.sh` bash 嵌 python3 heredoc、`cert-expiry-check.sh` 每天 08:30），唯一的 Go 常驻服务 `siungo-token-cost` 是特例（需要 SQLite 与 `go:embed` 前端），不构成反证。替代形态见 [ADR-0008](0008-server-side-snapshot-via-cron.md)。
+- 端口选择：8080（主站）、8089（token-cost）、18099（干跑段）已占用，本机监听端口取 **127.0.0.1:8090**，M1 部署时确认。设备侧的引脚口径另见 [ADR-0007](0007-gpio-assignment-buttons-and-buzzer.md)（**注意：GPIO 10/11/12 是初版规划，2026-10-16 实测接线为 GPIO 6 / 7 / 21，ADR-0007 已订正**）
+- nginx 侧若只加 `location /api/status/` 而不动 server 级 `add_header`，要注意 **`add_header` 是替换语义不是合并**——新 location 若需要安全头，必须把 6 个头全部重写一遍，否则会静默丢掉 HSTS 等头（该教训对 ADR-0008 的 `location /status/` 同样适用）
 - 端口与路径前缀（`127.0.0.1:8090` + `/status/`）是初版占位，M1 部署时与 nginx 配置一起定稿；定稿后只需同步 [ADR-0006](0006-aggregator-url-pinning.md) 的一个常量
 - 本决策只定部署形态，**不定端点长什么样**（字段、刷新节奏、停更阈值），那些属于 [ADR-0004](0004-fixed-server-polling-and-staleness.md) 与后续实现规格

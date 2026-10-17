@@ -18,12 +18,21 @@
 namespace config {
 
 // ------------------------------------------------------------------ upstream I2C
-// Same wiring convention as pet-oled3: SDA=GPIO8 / SCL=GPIO9.
-// Both pins are marked "measured working" in HARDWARE.md section 1.2;
-// uptime-oled's GPIO4/5 is a second sample of the same conclusion.
+// Wiring verified on the bench 2026-10-16: the PCA9548A module's SDA/SCL are
+// wired to GPIO4 / GPIO5, NOT the GPIO8/9 originally planned in pet-oled3.
+// HARDWARE.md section 1.2 marks GPIO4/5 as the measured-working I2C pair.
 // GPIO 1/2 are forbidden (HARDWARE.md section 6.1: whole segment times out).
-static const uint8_t I2C_SDA_PIN = 8;
-static const uint8_t I2C_SCL_PIN = 9;
+//
+// ORDER MATTERS, and got it backwards once. On the bench the wires are
+//   GPIO4 -> module SCL,  GPIO5 -> module SDA
+// (operator report 2026-10-17: "g4 connects scl; g5 connects sda").
+// So GPIO5 drives SDA and GPIO4 drives SCL. Measured by i2c-probe v7: the
+// pair (SDA=GPIO5, SCL=GPIO4) ACKs 0x70, the pair (SDA=GPIO4, SCL=GPIO5)
+// answers nothing at all -- a swapped pair cannot form a START condition,
+// so every transaction returns error 2 with the lines sitting perfectly
+// idle HIGH. If 0x70 ever stops answering again, check the order first.
+static const uint8_t I2C_SDA_PIN = 5;
+static const uint8_t I2C_SCL_PIN = 4;
 static const uint32_t I2C_HZ = 400000;
 
 // Per-transaction timeout. HARDWARE.md section 6.2 measured that WITHOUT a
@@ -37,25 +46,54 @@ static const uint32_t I2C_TIMEOUT_MS = 50;
 // real address (HARDWARE.md section 4.8 item 1). Do not hardcode blindly.
 static const uint8_t PCA9548A_ADDR = 0x70;
 
+// ------------------------------------------------------------------ screen topology
+// Bench reality, 2026-10-17: the PCA9548A module used to fail at 0x70 because
+// SDA/SCL were crossed (see the I2C note above); that is fixed and the mux is
+// back in the signal path. Development ran single-screen-direct while the
+// fault was being hunted, and that topology is still supported.
+//
+// Development therefore runs single-screen-direct: the one panel is wired
+// directly to GPIO4/5 with NO mux in the signal path, and the firmware
+// paints the FOCUSED logical screen onto it. All three logical screens, both
+// pages, the data path and the buttons keep working -- only the number of
+// physical panels changes.
+//
+// Returning to three screens is a one-line edit here, nothing else:
+//   ACTIVE_SCREENS = 3 -> the mux is back in the path, each logical screen
+//                         owns a channel and a panel (docs/adr/0001)
+//   ACTIVE_SCREENS = 1 -> no mux; all logical screens share the one panel
+//                         and the buttons choose which one is shown
+// The mux is in the signal path exactly when this count is greater than 1,
+// so there is only one knob and no combination of settings that is wrong.
+
 // ------------------------------------------------------------------ downstream screens
 // Role split per docs/adr/0001: ch0 = ESP32 status, ch1 = server, ch2 = mailbox.
 // All three screens keep the 0x3C factory address (address conflicts are
 // isolated per channel -- HARDWARE.md section 4.6).
 static const uint8_t SSD1306_ADDR = 0x3C;
 
-// Screen count and the channel of each screen. Iterating the three screens
-// only ever references these two arrays.
+// Logical screens the firmware knows about. This is a software concept and
+// stays 3 in every topology: with one panel the three are painted in turn,
+// with three panels each owns one.
 static const uint8_t SCREEN_COUNT = 3;
 static const uint8_t SCREEN_CHANNEL[SCREEN_COUNT] = {0, 1, 2};
 
+// Physical panels actually wired. See the topology note above.
+// 1 = single panel straight onto GPIO4/5.
+// 3 = mux in the path, one panel per channel (current bench state since the
+//     SDA/SCL order was corrected and 0x70 started answering).
+static const uint8_t ACTIVE_SCREENS = 3;
+
 // ------------------------------------------------------------------ buttons
 // Two tactile buttons, internal pull-up, pressed = LOW.
-// GPIO 10/11/12 are three consecutive free pins (HARDWARE.md section 1.2
-// usable pool). Rationale for consecutive pins and the rejected
-// alternatives: docs/adr/0007.
-static const uint8_t PIN_BUTTON_PAGE = 10;    // button A: page on focused screen
-static const uint8_t PIN_BUTTON_FOCUS = 11;   // button B: switch focused screen
-static const uint8_t PIN_BUZZER = 12;         // active buzzer: on/off encoding
+// Wiring verified on the bench 2026-10-16: button A (page) on GPIO6,
+// button B (focus) on GPIO7. GPIO 10/11 were the original plan
+// (docs/adr/0007) but the bench wiring used 6/7 instead; ADR-0007 was
+// reconciled to the bench values. Buzzer moved off GPIO12 to GPIO21
+// because GPIO12 is an MTDI strapping pin.
+static const uint8_t PIN_BUTTON_PAGE = 6;    // button A: page on focused screen
+static const uint8_t PIN_BUTTON_FOCUS = 7;   // button B: switch focused screen
+static const uint8_t PIN_BUZZER = 21;        // active buzzer: on/off encoding
 
 // Debounce: sample press and release once each; a state change is accepted
 // only if it holds for the whole interval. Mechanical contacts chatter for
@@ -90,5 +128,51 @@ static const uint32_t REFRESH_REMOTE_MS = 1000;  // server / mailbox (M0: same)
 // a reset. Only currently-offline channels are probed, so the steady state
 // costs nothing.
 static const uint32_t RESCAN_INTERVAL_MS = 5000;
+
+// ------------------------------------------------------------------ network (M1)
+// Data source. M1a polls the main site's public /api/health (docs/adr/0009);
+// M1b switches this one constant to /status/snapshot.json (docs/adr/0008).
+// Nothing else in the firmware changes between the two phases.
+static const char* DATA_HOST = "www.siungo.top";
+static const char* DATA_PATH = "/api/health";
+static const uint16_t DATA_PORT = 443;
+
+// Shared key for M1b, sent as the X-Monitor-Key request header. EMPTY at
+// M1a because /api/health is public. Lives in src/secrets.h (gitignored),
+// never here.
+static const char* MONITOR_KEY_HEADER = "X-Monitor-Key";
+
+// Poll cadence and staleness threshold (docs/adr/0004):
+//   poll every 15 s; 60 s without a valid response = "stale".
+// Both are multiples of the poll interval so the staleness verdict is
+// decided by the device's own monotonic millis() clock, NOT by the
+// timestamp inside the JSON (the cron that produces it has minute
+// granularity, docs/adr/0008 consequence 3).
+static const uint32_t POLL_INTERVAL_MS = 15000;
+static const uint32_t STALE_AFTER_MS = 60000;
+
+// How often the WiFi link itself is checked (reconnect on drop). Longer than
+// the poll interval because a reconnect attempt costs seconds, not
+// milliseconds.
+static const uint32_t WIFI_CHECK_INTERVAL_MS = 5000;
+
+// WiFi connect timeout inside a single attempt (ms). On timeout the firmware
+// keeps running and shows "no data" instead of blocking setup() forever;
+// precedent: clock-oled/src/main.cpp connectWiFi().
+static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+
+// TLS read timeout for one HTTP request (ms). The request itself is small,
+// so a slow answer means something is wrong; better to fail the poll and
+// retry on the next cadence than to sit and wait (docs/adr/0004: no
+// immediate retry).
+static const uint32_t HTTP_TIMEOUT_MS = 8000;
+
+// Size of the HTTP response buffer. /api/health answers with roughly 300
+// bytes; snapshot.json (M1b) is a flat JSON of ~20 short fields, so 1 KB is
+// generous while still cheap on the stack/static pool.
+static const uint16_t HTTP_RESPONSE_MAX = 1024;
+
+// Serial log line length cap for poll diagnostics.
+static const uint16_t LOG_LINE_MAX = 160;
 
 }  // namespace config
