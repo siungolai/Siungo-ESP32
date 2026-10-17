@@ -66,6 +66,8 @@ nginx 侧：
 
 ```nginx
 # /etc/nginx/conf.d/status-key.conf  (root:root 0600)
+# 由 nginx.conf 的 `include /etc/nginx/conf.d/*.conf;` 在 http{} 上下文加载，
+# server 块里 **不要** 再 include 它 —— map 只能出现在 http{} 里。
 map $http_x_monitor_key $status_ok {
     default 0;
     "<MONITOR_KEY>" 1;
@@ -74,13 +76,21 @@ map $http_x_monitor_key $status_ok {
 
 ```nginx
 # sites-available/photography 内的 location
-include /etc/nginx/conf.d/status-key.conf;
 location /status/ {
-    if ($status_ok = 0) { return 403; }
     root /var/www;
-    ...
+    autoindex off;
+
+    location ~ ^/status/(snapshot|mailbox)\.json$ {
+        if ($status_ok = 0) { return 403; }
+        try_files $uri =404;
+        ...
+    }
+
+    return 403;   # /status/ 下其它一切路径
 }
 ```
+
+**认证必须写在内层正则 location 里**（2026-10-17 部署实测踩到的坑，已回写本 ADR）：最初把 `if ($status_ok = 0)` 只放在外层 `location /status/`，把 `.json` 白名单放进嵌套 location——结果 `/status/anything` 正确返回 403，而 `/status/snapshot.json` 无论带不带密钥都返回 200。原因：**请求一旦匹配到嵌套 location，外层 location 的 `if` 就不再对它求值**。鉴权写在最内层才是有效的，外层只用于兜底拒绝。
 
 **为什么不用别的形态**：
 
@@ -99,6 +109,8 @@ location /status/ {
 ### 配置副本入仓
 
 把 nginx location 片段、`status-key.conf` 模板、crontab 行作为**脱敏模板**提交到 `status-oled3/docs/server/`（密钥一律写 `<MONITOR_KEY>` 占位）。理由：这台机器至今没有任何 nginx/systemd/cron 配置副本，重建只能靠记忆；模板入仓让「照抄一遍」成为可能，同时模板不含真实秘密。
+
+**字段契约不在本 ADR 里**：两份 JSON 的字段名与类型冻结在 [ADR-0012](0012-json-field-contract-for-server-side-documents.md)，并配一个部署前校验器 `status-oled3/docs/server/status-check.py`。本 ADR 只定形态，不定字段。
 
 ## 后果
 

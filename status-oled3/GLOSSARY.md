@@ -52,6 +52,22 @@ _Avoid_: 邮件数、新邮件、inbox count
 设备向聚合端点发起一次 GET 的时间间隔。本项目固定为 **15 秒**，停更阈值 **60 秒**（4 次无响应），见 [ADR-0004](docs/adr/0004-fixed-server-polling-and-staleness.md)。
 _Avoid_: 刷新率、采样率、拉取间隔
 
+**指标快照 / 邮箱快照**：
+M1b 服务器侧的两个 JSON 文档，`snapshot.json`（19 个字段：CPU / 内存 / Swap / 磁盘 / 负载 / 网络吞吐 / 服务探活 / 证书剩余天数，每分钟生成）与 `mailbox.json`（5 个字段：未读总数与账号统计，每 5 分钟生成）。产出脚本与字段契约见 [ADR-0012](docs/adr/0012-json-field-contract-for-server-side-documents.md)，部署模板在 [`docs/server/`](docs/server/)。
+_Avoid_: 数据包、payload、响应体
+
+**字段契约**：
+两份快照 JSON 的字段名与类型集合，已冻结。只允许三种类型：**字符串、数字、`null`**——设备侧取值器（[ADR-0010](docs/adr/0010-hand-written-json-value-extractor.md)）读不了数组与布尔值，「是/否」一律编码成 1/0；`null` 表示「采不到」，绝不省略字段、绝不发 0（0 会被当成真测量）。字段改名或改类型不会让任何一方报错，只会让屏幕上那个字段永远显示 `-`，因此每次改动必须三处同步：ADR 表格、`status-snapshot.py` 的 `FIELDS`、`status-check.py` 的 `REQUIRED`。
+_Avoid_: 接口文档、schema、协议
+
+**文档形状（M1b 新增，2026-10-17）**：
+设备在把一份响应当作数据之前，先确认它**是一整个扁平 JSON 对象、且带着本文档自己的字段**。这是两道独立的门，缺一不可：第一道（`health.cpp` 的 `looksComplete()`）挡截断——响应被 `HTTP_RESPONSE_MAX` 切断时，切点之后的字段会永远显示 `-`，而 `-` 在屏上的含义是「采集器采不到」，把截断显示成采集失败是撒谎；第二道（`jsonfield::hasKey()`）挡**错的文档**——`/status/` 的 nginx location 若漏配或被 SPA fallback 抢先，站点会返回 **HTTP 200 + index.html**，既不是错误页也不是数据，却长得像一次成功。第一道门先用大括号配平把它挡掉；第二道门兜住「HTML 里恰好有 JSON 样子的 script 块」这种残余情况。
+_Avoid_: 校验、格式检查、validate
+
+**null 与缺失（M1b 新增，2026-10-17）**：
+屏幕上显示 `-` 有两种完全不同的原因，契约要求它们不可混同。`null` = 服务器采到了但没测到（`cpu_pct: null` = 采样失败），字段**在**文档里；缺失 = 字段**不在**文档里（服务器改名、发错文档、固件读错键）。`jsonfield::field()` 对两者都返回空串，因此设备新增了 `hasNumber()` / `hasKey()` 两个探针来区分，屏幕上两者都渲染为 `-`，串口日志与 `.doc/m1b` 的负路径样本则把区别留给人看。
+_Avoid_: 空值、空字段、missing
+
 ## 设备状态层
 
 **本机状态**：
@@ -93,8 +109,10 @@ _Avoid_: 阶段一、第一阶段、phase 0
 
 **M1（数据链路）**：
 服务器侧以 cron + 静态 JSON 产出指标快照（[ADR-0008](docs/adr/0008-server-side-snapshot-via-cron.md)），设备侧先接主站现成的 `/api/health` 打通 HTTPS 与停更判定（[ADR-0009](docs/adr/0009-phase-in-with-existing-health-endpoint.md)），再切到快照端点（[ADR-0004](docs/adr/0004-fixed-server-polling-and-staleness.md)）。邮箱先接 1 个测试账号，每 5 分钟由独立 cron 拉取，汇总为未读总数。**M1 的服务器侧部署以 M0 链路通为前提**——链路不通时先做设备侧代码。
+**当前状态（2026-10-17）**：**M1 全线打通并已上线**。M1a（设备侧链路）早前上板实测通过；M1b 的服务器侧（cron 每分钟产 snapshot、每 5 分钟产 mailbox、nginx `/status/` 带密钥鉴权）已部署到阿里云主机，设备侧固件已切换 `DATA_PATH=/status/snapshot.json` 并持续取数。实测：无密钥/错密钥 403、正确密钥 200、白名单外 403，`status-check.py` 门禁 exit 0，串口 `[poll] snapshot ok` 连续递增。邮箱侧因尚未配置 IMAP 凭据，`mailbox.json` 为 `available:0 / unread:null` 的合法文档（屏幕显示「未配置」而非「0 未读」）。
 _Avoid_: 阶段二、联调
 
 **M2（完整界面）**：
 三屏完整内容、聚焦屏翻页交互、蜂鸣器全部提示节奏落地。
+**当前状态（2026-10-17）**：M2 的界面部分已随 M1b 设备侧一并落地（服务器屏两页、邮箱屏未读数、聚焦屏翻页、未读上升沿提示音）；M2 剩余项是**证书固定**（`setCACert()` 取代 `setInsecure()`，[ADR-0006](docs/adr/0006-aggregator-url-pinning.md) 已记录的升级路径）与逐账号邮箱状态数组（需先把服务器输出改扁平，见 [ADR-0010](docs/adr/0010-hand-written-json-value-extractor.md) 负面第 1 条）。
 _Avoid_: 阶段三、收尾
