@@ -1,22 +1,27 @@
 /**
  * main.cpp -- status-oled3 firmware, M0 (hardware bringup) + M1a (data path)
+ * + M1b (two documents, full screens)
  *
  * M0 scope (see README.md milestone table): the PCA9548A + three SSD1306
- * chain, the two buttons, and the buzzer. No WiFi, no aggregator polling --
- * that is M1. Everything on screen here is either hardware state or a
- * placeholder, so that a "broken" screen can be told apart from a
- * "no data yet" screen by eye.
+ * chain, the two buttons, and the buzzer. Everything on screen here is
+ * either hardware state or a placeholder, so that a "broken" screen can be
+ * told apart from a "no data yet" screen by eye.
  *
  * M1a scope (docs/adr/0009): the device-side network path only -- WiFi,
- * HTTPS GET of the main site's public /api/health, JSON field extraction,
- * the 15 s poll cadence, the 60 s staleness verdict, and the two buzzer
- * edges that data can produce (WiFi lost, data stale). The server side is
- * untouched at this stage, so the ESP32 screen shows real RSSI/IP/heap and
- * the server screen shows the real process uptime and commit.
+ * HTTPS GET, JSON field extraction, the 15 s poll cadence, the 60 s
+ * staleness verdict, and the two buzzer edges that data can produce (WiFi
+ * lost, data stale).
  *
- * Structure: four independent cadences sharing one loop().
+ * M1b scope (docs/adr/0012): the server screen becomes two pages of real
+ * snapshot.json fields and the mailbox screen becomes real mailbox.json
+ * values, plus the third buzzer edge (new mail). The server side is NOT
+ * deployed by this change: the device is built to the contract and points
+ * at the real host, so a 403 (key not switched on yet) shows up as
+ * "data: no data yet" rather than as a firmware bug.
+ *
+ * Structure: five independent cadences sharing one loop().
  *   - buttons: drained every iteration (a missed press is a lost press)
- *   - network: 15 s poll, 5 s link check (see health.cpp)
+ *   - network: 15 s snapshot poll, 5 min mailbox poll, 5 s link check
  *   - ESP32 status screen: 1 s (uptime changes every second)
  *   - the other two screens: only when invalidated
  * The screen layer owns the dirty flag, so an iteration with nothing to do
@@ -25,6 +30,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
+#include <cmath>
 #include <cstdio>
 
 #include "button.h"
@@ -41,11 +47,15 @@ namespace {
 // ESP32 status screen (docs/adr/0001).
 screen::ScreenId g_focus = screen::SCREEN_LOCAL;
 
-// Page count of each screen. 1 everywhere at M0: the server screen's two
-// pages need real data to be worth showing, and the mailbox screen has a
-// single page by design. ADR-0001 keeps the roles fixed, so these counts are
-// set once here instead of being derived per draw.
-uint8_t g_page_count[screen::SCREEN_COUNT] = {1, 1, 1};
+// Page count of each screen (docs/adr/0001):
+//   local   -- one page, six rows of local facts fit without scrolling
+//   server  -- two pages: (1) cpu/mem/load, (2) disk/net/services
+//   mailbox -- one page: five rows fit, and ADR-0001 explicitly says the
+//              mailbox does not need paging
+// The counts are fixed by the ADR, not derived from what happens to be
+// non-null today: a field that is null must still occupy its row, or the
+// layout would shift under the user when one collector breaks.
+uint8_t g_page_count[screen::SCREEN_COUNT] = {1, 2, 1};
 
 // ---- refresh timing -------------------------------------------------------
 uint32_t g_last_local_ms = 0;
@@ -57,9 +67,10 @@ uint32_t g_last_netlog_ms = 0;
 // values are chosen so that booting never fires a pattern by itself:
 //   prevNetOnline = true  -> the first "down" is a real transition
 //   prevStale     = false -> the first "stale" is a real transition
-//   prevUnread    = 0     -> set to the real value after the first fetch,
-//                            so "0 -> 7" is not mistaken for new mail
-// (mailbox stays at M1 pending until M1b, so prevUnread is unused for now).
+// The new-mail edge does not need a prev value here: health.cpp keeps its
+// own double-slot history, so a device that boots into a mailbox that
+// already has mail does not announce it (ADR-0011's own warning about the
+// one decision that is easiest to get wrong).
 bool g_prev_net_online = true;
 bool g_prev_link_usable = false;
 bool g_prev_stale = false;
@@ -85,6 +96,60 @@ void formatUptime(char* out, size_t n, uint32_t seconds) {
            static_cast<unsigned long>(days), static_cast<unsigned long>(hours),
            static_cast<unsigned long>(mins),
            static_cast<unsigned long>(secs));
+}
+
+// kB -> "1.6G" / "421M" / "0.9G" style. The snapshot sends kB (ADR-0012),
+// and a 16-digit kB number does not fit next to a label; a human-readable
+// size does. Rounding is truncation on purpose -- a used value that reads
+// slightly low is honest, one that rounds up claims memory that is still
+// free.
+void formatKb(char* out, size_t n, double kb) {
+  if (!(kb >= 0.0)) {  // also catches NAN
+    snprintf(out, n, "%s", "-");
+    return;
+  }
+  if (kb >= 1024.0 * 1024.0) {
+    snprintf(out, n, "%.1fG", kb / (1024.0 * 1024.0));
+  } else if (kb >= 1024.0) {
+    snprintf(out, n, "%luM", static_cast<unsigned long>(kb / 1024.0));
+  } else {
+    snprintf(out, n, "%luK", static_cast<unsigned long>(kb));
+  }
+}
+
+// A percentage with an unknown denominator is not a number (ADR-0012): a
+// null on either side renders "-" rather than 0, which would read as
+// "nothing used".
+void formatPercent(char* out, size_t n, double used, double total) {
+  if (!(used >= 0.0) || !(total > 0.0)) {
+    snprintf(out, n, "%s", "-");
+    return;
+  }
+  snprintf(out, n, "%lu%%", static_cast<unsigned long>((used * 100.0) / total));
+}
+
+// One snapshot value as a row value. hasNumber() first, so null and absent
+// both land on "-" instead of on a 0 that would look like a measurement.
+// Numbers are printed as integers: every field in ADR-0012 is an integer
+// count (seconds, kB, bytes, a 0/1 flag, days), so a decimal point would
+// only ever be noise.
+bool kvNumber(screen::ScreenId id, uint8_t row, const char* key, const char* label,
+              const char* unit) {
+  if (!health::hasNumber(key)) {
+    screen::printKV(id, row, label, "-");
+    return false;
+  }
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%lu%s",
+           static_cast<unsigned long>(health::number(key)), unit);
+  screen::printKV(id, row, label, buf);
+  return true;
+}
+
+// Same, but for the fields that stay strings (net_if, generated_at).
+void kvString(screen::ScreenId id, uint8_t row, const char* key, const char* label) {
+  const char* v = health::string(key);
+  screen::printKV(id, row, label, (v != nullptr && v[0] != '\0') ? v : "-");
 }
 
 const char* screenTitle(screen::ScreenId id) {
@@ -155,6 +220,87 @@ void drawLocal() {
   screen::printKV(screen::SCREEN_LOCAL, 6, "btn", "A=page B=focus");
 }
 
+// Server screen page 1: CPU, memory, swap, load.
+void drawServerPage1() {
+  // CPU: the one field that must be shown as a bare number. cpu_pct is
+  // already a percentage (ADR-0012), so "%" is the only unit.
+  kvNumber(screen::SCREEN_SERVER, 1, "cpu_pct", "cpu", "%");
+
+  // Memory as a used percentage AND as sizes: the percentage is the number
+  // a human reads, the sizes are what make it auditable. Both sides of the
+  // percentage come from the same document, so a null on either side is a
+  // broken collector rather than a rounding problem, and "-" says exactly
+  // that.
+  const double mem_used = health::number("mem_used_kb");
+  const double mem_total = health::number("mem_total_kb");
+  char buf[32];
+  formatPercent(buf, sizeof(buf), mem_used, mem_total);
+  screen::printKV(screen::SCREEN_SERVER, 2, "mem", buf);
+
+  char sizes[32];
+  formatKb(sizes, sizeof(sizes), mem_used);
+  const size_t sizes_len = strlen(sizes);
+  sizes[sizes_len] = '/';
+  formatKb(sizes + sizes_len + 1, sizeof(sizes) - sizes_len - 1, mem_total);
+  screen::printKV(screen::SCREEN_SERVER, 3, "sz", sizes);
+
+  // Swap: shown only as a percentage, because a swap partition is either
+  // empty (0%, the healthy case) or a problem, and the absolute size adds
+  // nothing to that decision.
+  const double swap_used = health::number("swap_used_kb");
+  const double swap_total = health::number("swap_total_kb");
+  formatPercent(buf, sizeof(buf), swap_used, swap_total);
+  screen::printKV(screen::SCREEN_SERVER, 4, "swap", buf);
+
+  // Load: load1_x100 is loadavg * 100 (ADR-0012), so it needs the decimal
+  // point put back to be readable as a load average.
+  if (health::hasNumber("load1_x100")) {
+    const double load = health::number("load1_x100") / 100.0;
+    snprintf(buf, sizeof(buf), "%.2f", load);
+    screen::printKV(screen::SCREEN_SERVER, 5, "load1", buf);
+  } else {
+    screen::printKV(screen::SCREEN_SERVER, 5, "load1", "-");
+  }
+}
+
+// Server screen page 2: disk, network, service probes.
+void drawServerPage2() {
+  const double disk_used = health::number("disk_used_kb");
+  const double disk_total = health::number("disk_total_kb");
+  char buf[32];
+  formatPercent(buf, sizeof(buf), disk_used, disk_total);
+  screen::printKV(screen::SCREEN_SERVER, 1, "disk", buf);
+
+  char sizes[32];
+  formatKb(sizes, sizeof(sizes), disk_used);
+  const size_t sizes_len = strlen(sizes);
+  sizes[sizes_len] = '/';
+  formatKb(sizes + sizes_len + 1, sizeof(sizes) - sizes_len - 1, disk_total);
+  screen::printKV(screen::SCREEN_SERVER, 2, "sz", sizes);
+
+  // Interface name only: the byte counters stay strings because a 64-bit
+  // counter does not survive a double (ADR-0012 note), and the screen has
+  // no room for "eth0 976056208" anyway.
+  kvString(screen::SCREEN_SERVER, 3, "net_if", "if");
+
+  // Service probes: the whole point of these three fields is the 0/1, so
+  // they are rendered as words. A null means the probe could not run, which
+  // is not "down" -- the collector could not reach the unit, the service is
+  // not necessarily stopped.
+  const char* probe_label[3] = {"web", "api", "upl"};
+  const char* probe_key[3] = {"svc_web", "svc_api", "svc_upload"};
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (!health::hasNumber(probe_key[i])) {
+      screen::printKV(screen::SCREEN_SERVER, static_cast<uint8_t>(4 + i),
+                      probe_label[i], "-");
+      continue;
+    }
+    const double v = health::number(probe_key[i]);
+    screen::printKV(screen::SCREEN_SERVER, static_cast<uint8_t>(4 + i),
+                    probe_label[i], v > 0.5 ? "up" : "down");
+  }
+}
+
 void drawServer() {
   if (!screen::online(screen::SCREEN_SERVER)) {
     return;
@@ -162,41 +308,44 @@ void drawServer() {
   screen::drawTitleBar(screen::SCREEN_SERVER, "SERVER",
                        g_focus == screen::SCREEN_SERVER);
 
-  // M1a: the server screen carries what /api/health can actually answer --
-  // the Go process's own uptime and its build identity. It deliberately
-  // does NOT show CPU/memory/disk: those come with the M1b snapshot
-  // (docs/adr/0008 consequence 1 says this is a real, if thin, data view,
-  // not a placeholder).
-  const char* up = health::serverUptime();
-  screen::printKV(screen::SCREEN_SERVER, 1, "up",
-                  (up != nullptr && up[0] != '\0') ? up : "-");
-  screen::printKV(screen::SCREEN_SERVER, 2, "commit",
-                  health::serverCommit()[0] != '\0' ? health::serverCommit()
-                                                    : "-");
-
-  // Freshness instead of a page counter: at one page there is nothing to
-  // count, and "how old is this data" is the number that matters now.
+  // Freshness first, on both pages: it is the only field that says whether
+  // the numbers below it are current. "no data yet" is deliberately distinct
+  // from "stale" -- the first means the device has never had a document
+  // (expected before the server side is deployed), the second means it had
+  // one and stopped getting them (a real failure).
   if (!health::netOnline()) {
-    screen::printKV(screen::SCREEN_SERVER, 3, "data", "wifi down");
+    screen::printKV(screen::SCREEN_SERVER, 7, "data", "wifi down");
   } else if (!health::linkUsable()) {
-    screen::printKV(screen::SCREEN_SERVER, 3, "data", "no route out");
+    screen::printKV(screen::SCREEN_SERVER, 7, "data", "no route out");
   } else if (health::stale()) {
     char buf[32];
     const uint32_t age = health::secondsSinceData();
     if (age == 0) {
-      screen::printKV(screen::SCREEN_SERVER, 3, "data", "no data yet");
+      screen::printKV(screen::SCREEN_SERVER, 7, "data", "no data yet");
     } else {
-      snprintf(buf, sizeof(buf), "stale %lus", static_cast<unsigned long>(age));
-      screen::printKV(screen::SCREEN_SERVER, 3, "data", buf);
+      snprintf(buf, sizeof(buf), "stale %lus",
+               static_cast<unsigned long>(age));
+      screen::printKV(screen::SCREEN_SERVER, 7, "data", buf);
     }
   } else {
-    screen::printKV(screen::SCREEN_SERVER, 3, "data", "fresh");
+    screen::printKV(screen::SCREEN_SERVER, 7, "data", "fresh");
   }
 
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(health::pollCount()));
-  screen::printKV(screen::SCREEN_SERVER, 4, "polls", buf);
-  screen::printKV(screen::SCREEN_SERVER, 6, "focus", "B to switch");
+  if (screen::pageIndex(screen::SCREEN_SERVER) == 0) {
+    drawServerPage1();
+  } else {
+    drawServerPage2();
+  }
+
+  // Page indicator, only when there is more than one page: with one page it
+  // would be a permanent, meaningless decoration.
+  if (screen::pageCount(screen::SCREEN_SERVER) > 1) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%u/%u A=page",
+             static_cast<unsigned>(screen::pageIndex(screen::SCREEN_SERVER) + 1),
+             static_cast<unsigned>(screen::pageCount(screen::SCREEN_SERVER)));
+    screen::printKV(screen::SCREEN_SERVER, 6, "pg", buf);
+  }
 }
 
 void drawMailbox() {
@@ -205,16 +354,87 @@ void drawMailbox() {
   }
   screen::drawTitleBar(screen::SCREEN_MAILBOX, "MAILBOX",
                        g_focus == screen::SCREEN_MAILBOX);
-  // M1b fills this in (the mailbox cron writes mailbox.json, docs/adr/0008).
-  // Until then the honest placeholder stays: it is distinguishable from a
-  // broken screen and from a real "0 unread".
-  screen::printKV(screen::SCREEN_MAILBOX, 1, "ch", "0x3C/9548A");
-  screen::printKV(screen::SCREEN_MAILBOX, 2, "unread", "M1 pending");
-  screen::printKV(screen::SCREEN_MAILBOX, 3, "focus", "B to switch");
+
+  char buf[32];
+
+  // The headline number. Three states, not two, because "no mail" and "we
+  // cannot know" are different situations:
+  //   n          -- a real count from the server
+  //   -          -- available but unread is null: at least one IMAP account
+  //                 failed, so the total would be a lie (ADR-0012 rule 6)
+  //   n/a        -- available=0: no credentials configured on the server at
+  //                 all, which is a setup state, not an empty inbox
+  if (!health::mailboxAvailable()) {
+    screen::printKV(screen::SCREEN_MAILBOX, 1, "unread", "n/a");
+  } else if (!health::mailboxUnreadKnown()) {
+    screen::printKV(screen::SCREEN_MAILBOX, 1, "unread", "-");
+  } else {
+    snprintf(buf, sizeof(buf), "%ld", health::mailboxUnread());
+    screen::printKV(screen::SCREEN_MAILBOX, 1, "unread", buf);
+  }
+
+  // Accounts and failures. failed_count > 0 is the only reason unread can
+  // be null, so showing it next to the headline is what makes the "-"
+  // above self-explanatory.
+  if (health::mailboxAvailable()) {
+    snprintf(buf, sizeof(buf), "%u", health::mailboxAccountCount());
+    screen::printKV(screen::SCREEN_MAILBOX, 2, "accts", buf);
+    const unsigned failed = health::mailboxFailedCount();
+    snprintf(buf, sizeof(buf), "%u", failed);
+    screen::printKV(screen::SCREEN_MAILBOX, 3, "failed", buf);
+  } else {
+    screen::printKV(screen::SCREEN_MAILBOX, 2, "accts", "-");
+    screen::printKV(screen::SCREEN_MAILBOX, 3, "failed", "-");
+  }
+
+  // Freshness, with the mailbox's own threshold: a five-minute cron is
+  // healthy at four minutes old, so "fresh" here means something different
+  // from what it means on the server screen.
+  if (!health::netOnline()) {
+    screen::printKV(screen::SCREEN_MAILBOX, 4, "data", "wifi down");
+  } else if (!health::linkUsable()) {
+    screen::printKV(screen::SCREEN_MAILBOX, 4, "data", "no route out");
+  } else if (health::mailboxStale()) {
+    const uint32_t age = health::mailboxSecondsSinceData();
+    if (age == 0) {
+      screen::printKV(screen::SCREEN_MAILBOX, 4, "data", "no data yet");
+    } else {
+      // The mailbox cadence is minutes, so the useful unit is minutes:
+      // "stale 7m" says more than "stale 421s".
+      snprintf(buf, sizeof(buf), "stale %lum",
+               static_cast<unsigned long>(age / 60UL));
+      screen::printKV(screen::SCREEN_MAILBOX, 4, "data", buf);
+    }
+  } else {
+    screen::printKV(screen::SCREEN_MAILBOX, 4, "data", "fresh");
+  }
+
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(health::mailboxPollCount()));
+  screen::printKV(screen::SCREEN_MAILBOX, 5, "polls", buf);
+
+  // ADR-0001 records that the mailbox screen has no second page, so button A
+  // here is a permanent no-op; the on-screen hint keeps that from looking
+  // like a dead button.
+  screen::printKV(screen::SCREEN_MAILBOX, 6, "pg", "1 page, B=focus");
 }
 
-// Redraw one screen's content, then push it.
+// ---- screen / serial output -------------------------------------------------
+// The panel only carries one screen at a time in the single-panel topology,
+// so nothing here needs a "what am I showing" lock. What it does need is a
+// lock between "redraw what changed" and "the user asked for a different
+// screen": if the 1 s local repaint ran after a focus switch, the new screen
+// would be overwritten before the user saw it.
+//
+// Every screen is drawn through here, and this is the only place a screen is
+// drawn, so the rule holds by construction rather than by remembering it.
 void renderScreen(screen::ScreenId id) {
+  // A focus switch queues a repaint of all three; the ones that are not
+  // showable would only burn I2C time, and the panel would end up showing
+  // whichever screen happened to be drawn last.
+  if (!screen::showable(id)) {
+    return;
+  }
   switch (id) {
     case screen::SCREEN_LOCAL:
       drawLocal();
@@ -281,21 +501,21 @@ void onButtonFocus() {
 
 void handleButtons() {
   // Drain both buttons every iteration. Long presses are accepted by the
-  // state machine but have no M0 action, so they are logged and dropped.
+  // state machine but have no action yet, so they are logged and dropped.
   // Every accepted SHORT press is acknowledged with a short click, whether
   // or not it changed anything on screen (docs/adr/0003, "button feedback").
   const button::Event page = button::drain(button::BTN_PAGE);
   if (page == button::EVENT_SHORT_PRESS) {
     onButtonPage();
   } else if (page == button::EVENT_LONG_PRESS) {
-    Serial.println("btn A long: no action at M0");
+    Serial.println("btn A long: no action");
   }
 
   const button::Event focus = button::drain(button::BTN_FOCUS);
   if (focus == button::EVENT_SHORT_PRESS) {
     onButtonFocus();
   } else if (focus == button::EVENT_LONG_PRESS) {
-    Serial.println("btn B long: no action at M0");
+    Serial.println("btn B long: no action");
   }
 }
 
@@ -304,6 +524,13 @@ void handleButtons() {
 // Turn the current state into events (docs/adr/0011). Called once per loop
 // after health::update(), so an edge is seen within one iteration of it
 // happening.
+//
+// When several edges fire in the same iteration they are played in the
+// ADR-0011 order (new mail, then staleness, then link loss). The patterns
+// are blocking, so "played in order" means the later ones start after the
+// earlier ones finish -- which is the intended behaviour: a queue, not an
+// overlap, because overlapping buzzes are indistinguishable from one long
+// broken one.
 void handleEdges() {
   // Two separate link facts, two separate edges. "Associated but no route
   // out" is its own condition (bench-measured 2026-10-17): the WiFi stack
@@ -335,8 +562,16 @@ void handleEdges() {
   }
   g_prev_stale = stale;
 
+  // New mail. Consumed here so exactly one pattern plays per rising edge,
+  // however many loop iterations pass before the next mailbox poll.
+  if (health::unreadRose()) {
+    buzzer::patternNewMail();
+    Serial.println("edge: new mail");
+  }
+
   // The data screens only change when a poll lands or focus moves, so they
-  // are invalidated here rather than on a timer.
+  // are invalidated here rather than on a timer. Both documents: the mailbox
+  // screen has its own cadence and must repaint when its own poll lands.
   if (net_online) {
     screen::invalidate(screen::SCREEN_SERVER);
     screen::invalidate(screen::SCREEN_MAILBOX);
@@ -347,7 +582,7 @@ void handleEdges() {
 
 void printBootReport() {
   Serial.println();
-  Serial.println("=== status-oled3 M1a boot report ===");
+  Serial.println("=== status-oled3 M1b boot report ===");
   if (pca9548a::isDirect()) {
     // One panel on the bus directly: reporting "pca9548a ABSENT" would be
     // noise, and reporting "screen ch0/ch1/ch2" would be a lie -- there is
@@ -375,12 +610,24 @@ void printBootReport() {
   Serial.println(screenTitle(g_focus));
   Serial.print("data source        : https://");
   Serial.print(config::DATA_HOST);
-  Serial.println(config::DATA_PATH);
+  Serial.print(config::DATA_PATH);
+  Serial.print(" + ");
+  Serial.println(config::MAILBOX_PATH);
   Serial.print("poll interval      : ");
   Serial.print(static_cast<unsigned>(config::POLL_INTERVAL_MS / 1000UL));
   Serial.print(" s, stale after ");
   Serial.print(static_cast<unsigned>(config::STALE_AFTER_MS / 1000UL));
+  Serial.print(" s; mailbox every ");
+  Serial.print(static_cast<unsigned>(config::MAILBOX_INTERVAL_MS / 1000UL));
+  Serial.print(" s, stale after ");
+  Serial.print(static_cast<unsigned>(config::MAILBOX_STALE_AFTER_MS / 1000UL));
   Serial.println(" s");
+  Serial.print("pages              : local=");
+  Serial.print(static_cast<unsigned>(g_page_count[screen::SCREEN_LOCAL]));
+  Serial.print(" server=");
+  Serial.print(static_cast<unsigned>(g_page_count[screen::SCREEN_SERVER]));
+  Serial.print(" mailbox=");
+  Serial.println(static_cast<unsigned>(g_page_count[screen::SCREEN_MAILBOX]));
   Serial.println("==================================");
   Serial.println();
 }
@@ -432,9 +679,10 @@ void loop() {
   button::tick();
   handleButtons();
 
-  // Network: the 15 s poll and the 5 s link check. This is where a blocking
-  // TLS request happens, so it runs after the buttons and before the
-  // screens; the request is bounded by HTTP_TIMEOUT_MS.
+  // Network: the 15 s snapshot poll, the 5 min mailbox poll and the 5 s link
+  // check. This is where a blocking TLS request happens, so it runs after
+  // the buttons and before the screens; the request is bounded by
+  // HTTP_TIMEOUT_MS.
   health::update();
   handleEdges();
 

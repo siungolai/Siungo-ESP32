@@ -5,8 +5,8 @@
  * reads a FLAT object of string and number values and nothing else. No
  * nested objects, no arrays, no traversal, no serialization. Both data
  * sources in this project are flat by design:
- *   - https://www.siungo.top/api/health      (docs/adr/0009)
  *   - https://www.siungo.top/status/snapshot.json (docs/adr/0008)
+ *   - https://www.siungo.top/status/mailbox.json (docs/adr/0008)
  * If a future endpoint needs nesting, flatten the SERVER output first --
  * keeping a parser in firmware is the more expensive side (ADR-0010 notes).
  *
@@ -31,5 +31,12 @@ const char* field(const char* json, const char* key, char* out, size_t cap);
 // Numbers and strings are separate paths on purpose (ADR-0010 edge case 2):
 // a "37.5" string would otherwise be silently parsed with atof().
 bool number(const char* json, const char* key, double* out);
+
+// Returns true when "key" appears as a complete key in the object, whether
+// its value is a number, a string, or null. ADR-0012 makes null a real value
+// ("the collector could not measure"), so a caller that needs to tell
+// "field is null" from "field is absent" cannot use field(), which answers
+// "" for both. This is the only way to ask that question without parsing.
+bool hasKey(const char* json, const char* key);
 
 }  // namespace jsonfield

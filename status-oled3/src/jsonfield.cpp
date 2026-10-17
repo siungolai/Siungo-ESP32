@@ -12,6 +12,11 @@
  *                               simply comes back as ""
  *   5. "dev" / "unknown"     -> ordinary strings; the CALLER decides they
  *                               mean "not injected" (see health.cpp)
+ *
+ * hasKey() is the third function, added for ADR-0012: field() answers ""
+ * both for "key absent" and for "value is null", and null is now a real
+ * value ("the collector could not measure") that has to be told apart from
+ * an absent field on screen.
  */
 #include "jsonfield.h"
 
@@ -21,6 +26,23 @@
 namespace jsonfield {
 
 namespace {
+
+// Does "key" appear as a whole key in the object? Textual, like findValue():
+// a quote before and a quote after. That is exact enough for flat,
+// machine-generated JSON, which is all this project polls.
+bool keyPresent(const char* json, const char* key) {
+  const size_t key_len = strlen(key);
+  const char* p = json;
+  while ((p = strstr(p, key)) != nullptr) {
+    const char* after = p + key_len;
+    if (p == json || p[-1] != '"' || *after != '"') {
+      p = after;
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
 
 // Locate the value that follows "key": in a flat object.
 // Returns a pointer to the first character of the value, or nullptr.
@@ -56,6 +78,13 @@ const char* findValue(const char* json, const char* key) {
 }
 
 }  // namespace
+
+bool hasKey(const char* json, const char* key) {
+  if (json == nullptr || key == nullptr || key[0] == '\0') {
+    return false;
+  }
+  return keyPresent(json, key);
+}
 
 const char* field(const char* json, const char* key, char* out, size_t cap) {
   if (json == nullptr || key == nullptr || out == nullptr || cap == 0) {

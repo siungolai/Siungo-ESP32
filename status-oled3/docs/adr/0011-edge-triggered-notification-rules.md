@@ -71,3 +71,21 @@ static uint32_t prevUnread     = 0;      // mailbox
 
 - 本决策只管「何时响」，不管「响多长」——后者是 [ADR-0003](0003-active-buzzer-on-off-encoding.md) 的节奏表。
 - M1a 阶段只实现「停更」与「WiFi 断开」两个上升沿（未读数要等 M1b）；三个变量的结构先建好，避免 M1b 再改一轮。
+
+## 落地记录（2026-10-17，M1b 固件）
+
+未读上升沿已实现，但**没有按上面伪代码的「单槽 `prevUnread`」写**，而是改成「双槽一次轮询滞后」：
+
+```cpp
+// health.cpp 匿名 namespace
+bool     g_unread_prev_known = false;  long g_unread_prev = 0;  // poll N-1
+bool     g_unread_last_known = false;  long g_unread_last = 0;  // poll N
+```
+
+每次成功 mailbox 轮询做 `prev ← last; last ← new`，`unreadRose()` = `last_known && prev_known && last > prev`。
+
+**为什么偏离伪代码**：`health.h` 要求 `unreadRose()` 是「查询」而不是「存储标志」，调用方错过下一次轮询仍应能看到同一次上升沿。单槽方案在轮询处就地把 `prev` 更新掉，上升沿只在轮询后的一个 `loop()` 迭代内可见，而 `loop()` 里有阻塞蜂鸣器与 I2C flush——恰好是最容易错过的那一瞬。双槽让上升沿在整个 5 分钟邮箱轮询窗口内稳定为真，由 `main.cpp` 自己 latch（`g_announced_rose`）去重。
+
+**ADR-0011:53 的 `prevUnread` 初值陷阱由结构天然满足**：首次拉取时 `prev_known == false`，`last > prev` 不成立，不会把「0 → 7」误判成新邮件；第一次轮询后 `prev` 被同步为实际值。`unread` 变 `null`（IMAP 连不上）时 `last_known = false`，下次恢复时 `prev_known` 同样为 false，**不会产生幽灵沿**——这是单槽方案要靠额外分支才能保证的。
+
+`main.cpp` 的三个 `prev` 变量仍按本决策的初值设置（`prevNetOnline = true` / `prevStale = false`），上电自身不触发提示音的逻辑不变。

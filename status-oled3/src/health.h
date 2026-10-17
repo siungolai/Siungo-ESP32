@@ -1,78 +1,75 @@
-/**
- * health.h -- M1 data path: WiFi link, HTTPS poll, staleness verdict
- *
- * Owns everything about "is the server's data fresh" so that main.cpp only
- * has to read three values (netOnline / stale / secondsSinceData).
- *
- * Cadence (docs/adr/0004): poll every POLL_INTERVAL_MS (15 s). A response
- * counts as valid data only when ALL of these hold:
- *   1. HTTP status is 200,
- *   2. the body parses as JSON with the expected fields,
- *   3. the body is not an error page.
- * There is no immediate retry after a failure -- the next poll is 15 s away
- * by design, so a dead server is not hammered.
- *
- * Staleness (docs/adr/0004, docs/adr/0008 consequence 3): measured on the
- * device's own monotonic millis() clock, never on the timestamp inside the
- * JSON. The cron that produces snapshot.json has minute granularity, so a
- * JSON timestamp would make "the file is 40 s old" look normal.
- *
- * M1a endpoint (docs/adr/0009): the main site's public GET /api/health.
- * It carries no CPU/memory/disk fields -- only "the Go process is alive,
- * for how long, which commit". The status field is ALWAYS "ok" while the
- * process lives, so it is NOT a health verdict; the verdict is
- * "HTTP 200 + JSON parsed". That is pinned in the code below.
- */
+// status-oled3 firmware — HTTP health poller (M1b)
+//
+// M1a asked the aggregator for uptime/commit/built. M1b asks for the full
+// ADR-0012 snapshot.json (19 fields) plus a second mailbox.json (5 fields).
+// Both documents are read with the same 1 KiB response buffer and the same
+// text extractor (jsonfield.h), so the firmware carries no JSON parser.
+//
+// Two documents, two verdicts. A stale snapshot and a stale mailbox are
+// different failures with different UX: the server screen can still render
+// the last snapshot while the mailbox screen reports "no data". Neither
+// document can be used to excuse the other, so their timers, staleness
+// thresholds and success counters are all separate.
+//
+// All 19 snapshot keys are exposed verbatim (generated_at, sys_uptime_s, ...)
+// because that is exactly what status-snapshot.py writes; a rename in either
+// place must be mirrored in the other and in ADR-0012.
+
 #pragma once
 
 #include <stdint.h>
 
 namespace health {
 
-// One-time setup. Does NOT connect: connecting blocks for seconds and would
-// stall the first screen paint. Call update() from loop().
+// Starts the poller: resets every cached value, edge-detection state and
+// counter. Does not touch the network (caller brings WiFi up first).
 void begin();
 
-// Advance the state machine. Cheap when nothing is due: one millis() compare.
-// Safe to call every iteration.
+// Advances the state machine: WiFi upkeep, link verification, and one poll
+// when a document comes due. Never blocks longer than one HTTP request.
 void update();
 
-// True when WiFi is associated. Necessary but NOT sufficient: an AP can
-// accept the association and still give no route out of the LAN, which
-// makes every HTTPS attempt fail identically (bench-measured 2026-10-17).
-// Flips drive the "WiFi lost" buzzer edge (docs/adr/0011) and the ESP32
-// screen's wifi line.
+// ---- network state -------------------------------------------------------
+// g_net_online and g_link_usable are deliberately separate facts:
+// "associated with an AP" is not "able to reach the internet".
 bool netOnline();
-
-// True only when the association has been proven to carry traffic out of
-// the LAN. This is the precondition for polling: when false, update()
-// skips the poll instead of burning a TLS timeout every interval.
 bool linkUsable();
 
-// True when data is considered stale: either no successful poll yet, or the
-// last successful poll is older than STALE_AFTER_MS.
+// True when the newest snapshot is older than config::STALE_AFTER_MS.
+// False until the first snapshot lands (no data yet is "waiting", not "stale").
 bool stale();
-
-// Seconds since the last successful poll. Reported on the serial log and the
-// server screen so "how stale" is visible, not just "is stale".
 uint32_t secondsSinceData();
 
-// Seconds the server process has been up, from its own /api/health "uptime"
-// field. 0 when unknown. Displayed on the server screen at M1a.
-const char* serverUptime();
+// ---- snapshot values (ADR-0012, 19 fields) --------------------------------
+// Key names are the literal snapshot.json names. Missing key, null value or
+// non-numeric value all yield NAN / "", so callers must test hasNumber()
+// before trusting number() — null means "the host could not collect this",
+// which is not the same as 0.
+bool hasNumber(const char* key);
+double number(const char* key);
+const char* string(const char* key);
 
-// Commit identity from /api/health "commit" (and "built"). Returns "" when
-// unavailable. "dev"/"unknown" mean the server binary was built without
-// -ldflags injection (docs/adr/0010 edge case 5) -- the caller prints them
-// as "not injected" rather than as a real commit.
-const char* serverCommit();
-const char* serverBuilt();
+// ---- mailbox document (ADR-0012, 5 fields) --------------------------------
+// available: 1 = credentials configured, 0 = mailbox not configured at all.
+// unread: cross-account UNSEEN total, or null when any account failed.
+bool mailboxAvailable();
+bool mailboxUnreadKnown();
+long mailboxUnread();
+unsigned mailboxAccountCount();
+unsigned mailboxFailedCount();
+// Separate staleness for the mailbox document (see header comment).
+bool mailboxStale();
+uint32_t mailboxSecondsSinceData();
 
-// Number of successful polls since boot. Serial diagnostics only.
+// True on the single call where unread went up versus the previous poll.
+// Only meaningful when mailboxUnreadKnown(); drives the new-mail buzzer.
+bool unreadRose();
+
+// Diagnostics: how many times each document was fetched successfully.
 uint32_t pollCount();
+uint32_t mailboxPollCount();
 
-// Human-readable one-liner for the serial log, ASCII only (a serial log is
-// the only clue available when the screens say nothing useful).
+// One-line serial summary (net/link/staleness/age/counters).
 void printStatus();
 
 }  // namespace health

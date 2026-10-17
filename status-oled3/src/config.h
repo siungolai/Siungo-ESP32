@@ -119,10 +119,18 @@ static const uint32_t BUZZER_GAP_MS = 120;    // pause between repeated beeps
 // The three screens refresh independently (docs/adr/0001 note), but at two
 // different rates:
 //   - ESP32 status screen: uptime changes every second -> 1 s redraw
-//   - server / mailbox screens: content comes from a 15 s poll, so there
-//     is no point redrawing them every second
-static const uint32_t REFRESH_LOCAL_MS = 1000;   // ESP32 status screen
-static const uint32_t REFRESH_REMOTE_MS = 1000;  // server / mailbox (M0: same)
+//   - the data screens: redrawn when a new document lands, which is the
+//     honest cadence for a document the server only rewrites every 15 s
+//     (snapshot) or every 5 min (mailbox). A screen that stops receiving
+//     data stops being repainted, so what stays on it is visibly the last
+//     real document rather than a clock counting up over stale numbers.
+static const uint32_t REFRESH_LOCAL_MS = 1000;    // ESP32 status screen
+static const uint32_t REFRESH_REMOTE_MS = 15000;  // server screen (M1b)
+
+// Rate limit for the "[poll] body parsed but uptime missing" style warnings:
+// without it a 200 OK that is the wrong document logs a line every 15 s for
+// as long as the misconfiguration lasts.
+static const uint32_t POLL_WARN_INTERVAL_MS = 60000;
 
 // How often an absent screen is re-probed, so unplug/replug recovers without
 // a reset. Only currently-offline channels are probed, so the steady state
@@ -130,12 +138,21 @@ static const uint32_t REFRESH_REMOTE_MS = 1000;  // server / mailbox (M0: same)
 static const uint32_t RESCAN_INTERVAL_MS = 5000;
 
 // ------------------------------------------------------------------ network (M1)
-// Data source. M1a polls the main site's public /api/health (docs/adr/0009);
-// M1b switches this one constant to /status/snapshot.json (docs/adr/0008).
-// Nothing else in the firmware changes between the two phases.
+// Data sources. M1a polled the main site's public /api/health
+// (docs/adr/0009); M1b replaces that one source with the two documents the
+// cron collectors write (docs/adr/0008), served by nginx under /status/.
+// Both live on the same host and the same TLS path, so TLS, the shared key
+// and the link check are shared (src/netfetch.cpp) and only the path and the
+// cadence differ.
+//
+// /api/health is NOT polled any more. Keeping both shapes alive would mean
+// the parser has to guess which document it is holding, and the server
+// screen would have to explain where each number came from. The M1a code is
+// preserved in git history (commit 53218a2) if that source is ever needed
+// again.
 static const char* DATA_HOST = "www.siungo.top";
-static const char* DATA_PATH = "/api/health";
-static const uint16_t DATA_PORT = 443;
+static const char* DATA_PATH = "/status/snapshot.json";
+static const char* MAILBOX_PATH = "/status/mailbox.json";
 
 // Shared key for M1b, sent as the X-Monitor-Key request header. EMPTY at
 // M1a because /api/health is public. Lives in src/secrets.h (gitignored),
@@ -150,6 +167,24 @@ static const char* MONITOR_KEY_HEADER = "X-Monitor-Key";
 // granularity, docs/adr/0008 consequence 3).
 static const uint32_t POLL_INTERVAL_MS = 15000;
 static const uint32_t STALE_AFTER_MS = 60000;
+
+// Port both documents are served on. Kept as a constant rather than written
+// inline in health.cpp because the plain TCP link probe and the TLS fetch
+// must agree on it -- if they ever disagree, the probe would prove a path
+// that the fetch does not use.
+static const uint16_t DATA_PORT = 443;
+
+// The mailbox document is produced by a five-minute cron, so polling it on
+// the 15 s cadence would re-fetch an identical body four times out of five.
+// It gets its own slower cadence; the server metrics keep the 15 s one.
+static const uint32_t MAILBOX_INTERVAL_MS = 300000;
+
+// Staleness is judged per document, not globally: a mailbox cron that has
+// not run yet must not make the server screen claim the server is stale.
+// The mailbox threshold is therefore ~1.6 cron periods (5 min): a document
+// that is one period old is normal, one that is nearly two periods old is
+// not being refreshed. The server keeps the 60 s / 4 poll verdict.
+static const uint32_t MAILBOX_STALE_AFTER_MS = 480000;
 
 // How often the WiFi link itself is checked (reconnect on drop). Longer than
 // the poll interval because a reconnect attempt costs seconds, not
@@ -171,6 +206,25 @@ static const uint32_t HTTP_TIMEOUT_MS = 8000;
 // bytes; snapshot.json (M1b) is a flat JSON of ~20 short fields, so 1 KB is
 // generous while still cheap on the stack/static pool.
 static const uint16_t HTTP_RESPONSE_MAX = 1024;
+
+// ---- M1b field presentation ------------------------------------------------
+// snapshot.json sends raw counters and kB values (docs/adr/0012). Nothing
+// on the device divides or reformats them: the point of putting the scaling
+// on the server is that the firmware only has to print, so a wrong number
+// can always be traced to one place (docs/adr/0012 decision 3).
+//
+// Two derived numbers do not exist in the JSON and are computed here:
+//   mem used percent  = 100 * mem_used_kb / mem_total_kb
+//   disk used percent = 100 * disk_used_kb / disk_total_kb
+// Both fall back to "-" when either side is missing/null, which is the only
+// correct answer: a percentage with an unknown denominator is not a number.
+//
+// The bars on the server screen are drawn from the same percentages, not
+// from absolute sizes, so these two constants are only a fallback for a
+// display that has no room for the percent text.
+static const uint32_t MEM_BAR_KB = 4;     // one '#' per this many used MB of RAM
+static const uint32_t DISK_BAR_GB = 4;    // one '#' per this many used GB of disk
+static const uint8_t BAR_SEGMENTS = 21;   // 21 columns of 128 px at 6 px/char
 
 // Serial log line length cap for poll diagnostics.
 static const uint16_t LOG_LINE_MAX = 160;

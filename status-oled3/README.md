@@ -40,8 +40,8 @@ ESP32-S3 + PCA9548A + 三块 SSD1306 的桌面状态显示器。三块屏分别�
 |---|---|---|
 | M0 | 硬件 bringup：PCA9548A + 三屏链路实测，按钮消抖，蜂鸣器通断 | **已上板实测通过**（2026-10-17，`pca9548a 0x70 : online` + ch0/ch1/ch2 三屏全 online，字模方向正确无镜像，见下文） |
 | M1a | 设备侧数据链路：WiFi + HTTPS `GET /api/health` + 停更判定 + 断网/停更提示音 | **已上板实测通过**（2026-10-17，串口 `[poll] ok` + `stale=no`，见下文） |
-| M1b | 服务器侧 cron 快照 + 邮箱 cron，设备切到 `/status/snapshot.json` | 未开始 |
-| M2 | 完整界面：服务器屏两页、邮箱屏未读数、聚焦屏翻页 | 未开始 |
+| M1b | 服务器侧 cron 快照 + 邮箱 cron，设备切到 `/status/snapshot.json` | **服务器侧产物已写好并本地验证**（4 个文件，见下文），未部署；**设备侧已实现并编译通过**（双文档轮询、19+5 字段门面、服务器屏两页、未读上升沿），端点未切、未上板验收 |
+| M2 | 完整界面：服务器屏两页、邮箱屏未读数、聚焦屏翻页 | 服务器屏两页 + 邮箱未读数已随 M1b 设备侧落地，剩余 M2 = 证书固定（`setCACert` 取代 `setInsecure`）与逐账号邮箱状态数组 |
 
 M0 先行的理由：三屏 + PCA9548A 链路在本机**从未实测**，按钮与蜂鸣器在 [`HARDWARE.md`](../HARDWARE.md) 中零记录。先验证硬件再写上层，避免「代码写完了发现屏不亮」。
 
@@ -110,14 +110,14 @@ wifi: connected, IP=192.168.1.100 RSSI=-47 dBm
 | `screen.h/.cpp` | 三屏抽象：在线缓存、脏标记、标题栏反色、页状态 |
 | `button.h/.cpp` | 两只按钮的软件消抖状态机，非阻塞 |
 | `buzzer.h/.cpp` | 有源蜂鸣器通断编码，[ADR-0003](docs/adr/0003-active-buzzer-on-off-encoding.md) 的节奏表 |
-| `main.cpp` | M1a 主循环：五个独立节奏（按钮 / 网络 / ESP32 屏 1s / 另两屏按需 / 串口日志 60s） |
+| `main.cpp` | M1b 主循环：五个独立节奏（按钮 / 网络 / ESP32 屏 1s / 另两屏按需 / 串口日志 60s）+ 三屏绘制 + 上升沿提示 |
 
 M1a 新增三个文件：
 
 | 文件 | 职责 |
 |---|---|
-| `jsonfield.h/.cpp` | 手写扁平 JSON 取值器（`field()` / `number()`），[ADR-0010](docs/adr/0010-hand-written-json-value-extractor.md) |
-| `health.h/.cpp` | WiFi 连接、HTTPS 轮询、停更判定的全部状态；`main.cpp` 只读 `netOnline()` / `stale()` / `secondsSinceData()` |
+| `jsonfield.h/.cpp` | 手写扁平 JSON 取值器（`field()` / `number()` / `hasKey()`），[ADR-0010](docs/adr/0010-hand-written-json-value-extractor.md) |
+| `health.h/.cpp` | WiFi 连接、HTTPS 轮询、停更判定的全部状态；M1b 起轮询两份文档并直接按字面键暴露字段，`main.cpp` 不持有任何服务端状态 |
 | `secrets.h.example` | WiFi 凭据模板，复制成 `src/secrets.h` 后填值（已 gitignore，先例 `clock-oled`） |
 
 编译（本机 Windows，无需服务器侧工具链）：
@@ -131,7 +131,7 @@ pio run --project-dir W:\Github\Siungo-ESP32\status-oled3 -t upload
 pio device monitor -b 115200   # 或 VS Code 的 PlatformIO 串口监视器
 ```
 
-M1a 资源占用（编译实测）：RAM 15.5%（50736/327680）/ Flash 26.6%（887817/3342336）。对比 M0 的 6.8% / 8.6%，差额即 WiFi + TLS + HTTP 栈，与 [`HARDWARE.md`](../HARDWARE.md) §9 记录的 `clock-oled` 叠加 WiFi 后的量级一致（14.1% / 21.5%）。
+M1b 设备侧资源占用（编译实测，ESP32-S3）：RAM 16.3%（53536/327680）/ Flash 26.9%（898873/3342336）。对比 M1a 的 15.5% / 26.6%，差额约 +2.8 KB RAM / +11 KB Flash，来自两份文档的双轮询器、19+5 字段的 `hasKey()` 门面、服务器屏两页与邮箱屏的渲染路径。
 
 烧录后按 [`HARDWARE.md`](../HARDWARE.md) §4.8 的 checklist 逐项验，串口会打印 M0 boot report。**当前实机输出（2026-10-16，卡点状态）**：
 
@@ -148,14 +148,80 @@ focused screen     : ESP32
 `pca9548a 0x70 : online` + 三屏全 `online` = 链路打通。若有 `absent`，按报告定位是哪一段；按钮按下串口应打印 `page:` 或 `focus:`，蜂鸣器在空操作时极短响一次。
 
 - [`GLOSSARY.md`](GLOSSARY.md) — 本项目术语表
-- [`docs/adr/`](docs/adr/) — 决策记录（ADR-0001 ~ ADR-0011，其中 [ADR-0005](docs/adr/0005-aggregator-as-standalone-service-with-shared-secret.md) 已被否决并由 ADR-0008 取代）
+- [`docs/adr/`](docs/adr/) — 决策记录（ADR-0001 ~ ADR-0012，其中 [ADR-0005](docs/adr/0005-aggregator-as-standalone-service-with-shared-secret.md) 已被否决并由 ADR-0008 取代）
 - [`tools/i2c-probe/`](tools/i2c-probe/) — 总线诊断固件（I2C 扫描 + 线路完整性 + SDA/SCL 对调判别）
+- [`docs/server/`](docs/server/) — M1b 服务器侧产物（脱敏模板，密钥一律 `<MONITOR_KEY>` 占位）
+
+### M1b 设备侧实现要点（已编译，未上板）
+
+`src/health.cpp` 轮询两份文档、各自裁决：
+
+| 文档 | 轮询周期 | 停更阈值 | 屏幕 |
+|---|---|---|---|
+| `snapshot.json` | 15 s | 60 s | 服务器屏（两页） |
+| `mailbox.json` | 300 s | 480 s | 邮箱屏 |
+
+**`/status/mailbox.json` 与 `/status/snapshot.json` 共享同一个 nginx location**，因此一处 403 会让两份文档同时失败——但**停更是按文档分别判定的**：邮箱屏连续 8 分钟没有数据才宣称停更，不会因为快照端点坏了就跟着响（health.h 文件头「两个文档两个裁决」）。
+
+**邮箱屏未读上升沿**用双槽一次轮询滞后实现（`g_unread_prev` / `g_unread_last`），而不是一个可被调用方错过的存储标志位：一次成功轮询做 `prev ← last; last ← new`，`unreadRose()` = `last_known && prev_known && last > prev`。这样上升沿在整个 5 分钟窗口内稳定为真，`main.cpp` 自己 latch（`g_announced_rose`）避免同一窗口重复响。**首次拉取时 `prev_known == false`，天然满足 [ADR-0011](docs/adr/0011-edge-triggered-notification-rules.md) 「首次成功拉取后必须把 prevUnread 同步为实际值而非 0」那条最容易踩的坑**；`unread` 变 `null` 时 `last_known = false`，下次恢复时 `prev_known` 也是 false，不会产生幽灵沿。
+
+**19 个 snapshot 字段不做逐字段存储**：保留响应原文，`number(key)` / `string(key)` / `hasNumber(key)` 现场调 `jsonfield`。零额外存储，截断按实收解析（[ADR-0010](docs/adr/0010-hand-written-json-value-extractor.md) edge case 4）。`net_rx_bytes` / `net_tx_bytes` 走 `string()`——`double` 只有 53 位尾数，装不下 PB 级字节数。
+
+**两道接受门**（`health.cpp` 的 `pollSnapshot()`）：`looksComplete()` 挡截断，`jsonfield::hasKey(body, "generated_at")` 挡错文档。实测第二道门的现实来源：`GET https://www.siungo.top/status/snapshot.json` 目前返回 HTTP 200 + `<!doctype html>`（SPA fallback），第一道门已把它挡掉，串口打印 `[poll] snapshot body is not a complete flat JSON object`、`snap=STALE age=0s polls=0`——**这是端点未上线的预期表现，不是固件缺陷**。
+
+**服务器屏两页的内容划分**（[ADR-0001](docs/adr/0001-three-screen-role-split.md) 正面第 2 条「服务器指标一屏放不下，翻页是刚需」）：页 0 = up / cpu / mem / mem 条 / swap / load / data 状态行；页 1 = disk 条 / disk 百分比 / free / net_if / rx / tx / svc 三探活 / cert 天数。128 px @ 6 px/char = 21 列的硬约束逼出三处取舍：`disk=9873408/41251136`（22 字符）放不下 → 改「条 + 百分比 + avail」三行；`rx`/`tx` 各 9 位必须独占一行；`svc=web=1 api=1 up=1` 双重等号可读性差 → `svc=web1 api1 up1`。页号进标题栏（`SERVER 1/2`），不占正文行。
+
+**邮箱屏一页**（ADR-0001：未读数一屏列得下）：状态行（unconfigured / no data / stale / fresh）+ 未读大数字 + 账号/失败数 + 21 段 mailbox 段位条。按钮 A 在邮箱屏是空操作，按 ADR-0001 负面第 2 条与 ADR-0011 备注给 20 ms 极短提示音。
+
+### M1b 服务器侧产物（`docs/server/`，已写好未部署）
+
+四个文件，全部已在本机（Windows + Python 3.10）真跑验证：
+
+| 文件 | 作用 | 本地验证结果 |
+|---|---|---|
+| [`status-snapshot.py`](docs/server/status-snapshot.py) | 每分钟采集 19 个字段，临时文件 + `os.replace()` 原子写 `snapshot.json` | Windows 真跑 exit=0，降级行为符合设计（`/proc` 缺失 → 对应字段发 `null`，不发 0 不省略） |
+| [`status-mailbox.py`](docs/server/status-mailbox.py) | 每 5 分钟查 IMAP 未读总数，原子写 `mailbox.json` | `--selftest` 两种形态正确；无凭据文件真跑 exit=0 产出 `available:0` 的合法文档 |
+| [`nginx-and-cron.md`](docs/server/nginx-and-cron.md) | nginx `location` + `status-key.conf` + crontab + 部署后门禁的脱敏模板 | 模板，无副作用 |
+| [`status-check.py`](docs/server/status-check.py) | 部署前字段契约门禁（[ADR-0012](docs/adr/0012-json-field-contract-for-server-side-documents.md)） | 正路径 exit 0；4 类负路径（缺字段 / 数组值 / 布尔值 / 非 JSON）全部 `FAIL` exit 1 |
+
+> **旧 bash 采集脚本 `status-snapshot.sh` 已删除（2026-10-17）**：第一版用 bash，在 git-bash 下「测过」是被 MSYS 骗的（`/var/www/...` 被重写，写入静默失败），已全部改用 Python3。那段踩坑史留在 [ADR-0008](docs/adr/0008-server-side-snapshot-via-cron.md) 与 git 历史里，脚本本身不是部署产物，留着只会让人误抄——`nginx-and-cron.md` 的 crontab 只引用 `.py`。
+
+**字段契约已冻结在 [ADR-0012](docs/adr/0012-json-field-contract-for-server-side-documents.md)**：两份 JSON 只发字符串、数字、`null` 三种类型；「是/否」一律编码成 1/0；`null` 表示采不到。理由是设备侧解析器（[ADR-0010](docs/adr/0010-hand-written-json-value-extractor.md)）只会读字符串与数字——字段改名或改类型不会报错，只会让屏幕上那个字段永远显示 `-`。
+
+**部署顺序不可颠倒**：服务器侧先上线并通过 `status-check.py`，设备侧才切 `DATA_PATH`。否则设备会连续停更并触发三连短响，屏幕失去判断力。
+
+> 踩坑记录：第一版用 bash 写采集脚本，在 git-bash 下「测过」是被 MSYS 骗的（`/var/www/...` 路径被重写导致写入静默失败）。已全部改用 Python3，服务器与 Windows 都能真跑。
 
 ## 当前状态
 
-**M0 代码已就绪并通过编译**（ESP32-S3：RAM 6.8% / Flash 8.6%），已提交并推送（`7fbd2bc`，含 M0 固件与 7 条 ADR）。**M1a 设备侧数据链路已上板实测通过**（RAM 15.5% / Flash 26.6%，串口 `[poll] ok` / `stale=no`，实测记录见上文）。**M1b 服务器侧（cron + nginx location）未开始。**
+**M0 代码已就绪并通过编译**（ESP32-S3：RAM 6.8% / Flash 8.6%），已提交并推送（`7fbd2bc`，含 M0 固件与 7 条 ADR）。**M1a 设备侧数据链路已上板实测通过**（RAM 15.5% / Flash 26.6%）。**M1b 全线打通并已上线**（2026-10-17）：服务器侧 cron + nginx location 已部署到阿里云，设备侧固件（双文档轮询 + 字段门面 + 两页服务器屏 + 未读上升沿）已烧录并持续取数，RAM 16.3% / Flash 26.9%。
 
-M1a 的服务器侧**零改动**：设备轮询的是主站已有的公开端点 `GET /api/health`（nginx 已在反代）。切到 M1b 只需改 `src/config.h` 的 `DATA_PATH` 一个常量，其余逻辑不变（[ADR-0009](docs/adr/0009-phase-in-with-existing-health-endpoint.md)）。
+实测验收（2026-10-17 22:08，从服务器侧与设备侧双向确认）：
+
+| 检查项 | 结果 |
+|---|---|
+| `/status/snapshot.json` 无密钥 / 错密钥 | 403 / 403 |
+| `/status/snapshot.json` 带正确密钥 | 200 `application/json`，`Cache-Control: no-store` |
+| `/status/mailbox.json` 带正确密钥 / 无密钥 | 200 / 403 |
+| `/status/anything`、`/status/secret.json` | 403（白名单外一律拒绝） |
+| 主站 `/`、`/api/health`、SPA 路由 `/works` | 200 / 200 / 200 |
+| `studio.siungo.top`、`select.siungo.top` | 200 / 200（其它 vhost 未受影响） |
+| `status-check.py` 门禁 | `OK ... 19 fields` + `OK ... 5 fields`，exit 0 |
+| cron 自动刷新 | snapshot 每分钟刷新（实测 mtime 22:08:01） |
+| 设备串口 | `[poll] snapshot ok polls=16/17/18`，无解析失败 |
+
+`src/secrets.h` 的 `MONITOR_KEY` 已填入主站真值（44 字符，**不进 git**）。
+
+**部署过程中踩到并已回写文档的两个坑**（[ADR-0008](docs/adr/0008-server-side-snapshot-via-cron.md) 与 [`docs/server/nginx-and-cron.md`](docs/server/nginx-and-cron.md) 已修正模板）：
+
+1. **鉴权必须写在内层正则 location 里**。若 `if ($status_ok = 0)` 只放外层 `location /status/`，请求一旦匹配嵌套的 `.json` location，外层的 `if` 就不再对它求值——实测 `/status/anything` 返回 403 而 `/status/snapshot.json` 无密钥返回 200。
+2. **root 的 crontab 没有 user 字段**。`* * * * * root /usr/bin/python3 ...` 是 `/etc/crontab` 的格式，写进 `crontab -e` 会让 cron 去执行名叫 `root` 的命令。
+
+另：`map` 只能出现在 `http{}` 里，`conf.d/status-key.conf` 由 `nginx.conf` 的 `include /etc/nginx/conf.d/*.conf;` 加载，server 块里 **不能** 再 include 一次（否则报 `map directive is not allowed here`）。
+
+M1a 的服务器侧**零改动**：设备轮询的是主站已有的公开端点 `GET /api/health`（nginx 已在反代）。M1b 切到 `/status/snapshot.json` 后，`/api/health` 不再被设备轮询（[ADR-0009](docs/adr/0009-phase-in-with-existing-health-endpoint.md) 的过渡角色结束，端点本身仍作为主站健康检查保留）。
+
+**SPA catch-all 的教训保留在此**：M1b 端点上线前，`GET /status/snapshot.json` 返回 HTTP 200 + `<!doctype html>`（2026-10-17 用 `web_fetch` 核实），固件的 `[poll] snapshot body is not a complete flat JSON object` 是**预期行为**——第一道门（大括号配平）挡掉了 SPA 页面，没有把 HTML 当成数据。这是 [ADR-0008](docs/adr/0008-server-side-snapshot-via-cron.md) 「`location /status/` 必须插在 SPA fallback 之前」那条警告的现实来源，也是「两道接受门」设计价值的实证。
 
 M1a 上板实测（2026-10-17，COM4，串口日志）。单屏直连拓扑下：
 
@@ -181,7 +247,7 @@ net=up stale=no data_age=0s polls=4 up=52h35m51s commit=7153d58
 
 **上板时发现并已修正的一个 TLS 配置陷阱**（记在这里避免重犯）：第一次烧录后 `start_ssl_client: -1` 连续失败，而同一主机的明文 TCP 443 探测却通过。根因在框架里——`WiFiClientSecure` **既不调 `setCACert()` 也不调 `setInsecure()` 时**，`ssl_client.cpp:226-228` 会直接 `return -1`（「无 CA、无 bundle、且非 insecure」是它不接受的组合），与构造函数默认的「要校验」语义相反。现已在 `fetchOnce()` 里显式 `setInsecure()`，并在 `src/health.cpp` 头部注释与 [ADR-0006](docs/adr/0006-aggregator-url-pinning.md) 记录了取舍：负载公开、无凭据、字段形状可校验，伪造的最坏后果是屏幕数字错 + 提示音错；证书固定（保留校验）作为 M2 升级路径。**这不是「关掉校验就好」，是明确记录在案的安全姿态。**
 
-未提交、未推送的改动（截至 2026-10-17）：`.gitignore` 补 `**/.doc/`、`src/config.h` 按实测订正引脚并新增 M1 网络常量与 `ACTIVE_SCREENS` 拓扑开关、`src/main.cpp` 接入 M1a 数据链路、`src/health.cpp` 链路探测与 TLS 姿态、`src/pca9548a.*` 与 `src/screen.*` 的 `isDirect()` / `showable()` / `setFocused()` 单屏拓扑支持、`HARDWARE.md` §1.2/§4.5/§4.8 回写实测、`GLOSSARY.md` 与 `README.md` 同步、`docs/adr/0006` 补 `setInsecure()` 取舍、`docs/adr/0007` 脚位结论改为 bench 实测值、新增 `tools/i2c-probe/`、ADR-0008/0009/0010/0011 与 M1a 源码（`health.*` / `jsonfield.*` / `secrets.h.example`）。**按用户规则，无明确授权不 commit / push**，等用户确认后一并提交。
+未提交、未推送的改动（截至 2026-10-17）：`.gitignore` 补 `**/.doc/`、`src/config.h` 按实测订正引脚并新增 M1 网络常量与 `ACTIVE_SCREENS` 拓扑开关、`src/main.cpp` 接入 M1a 数据链路、`src/health.cpp` 链路探测与 TLS 姿态、`src/pca9548a.*` 与 `src/screen.*` 的 `isDirect()` / `showable()` / `setFocused()` 单屏拓扑支持、`HARDWARE.md` §1.2/§4.5/§4.8 回写实测、`GLOSSARY.md` 与 `README.md` 同步、`docs/adr/0006` 补 `setInsecure()` 取舍、`docs/adr/0007` 脚位结论改为 bench 实测值、新增 `tools/i2c-probe/`、ADR-0008/0009/0010/0011 与 M1a 源码（`health.*` / `jsonfield.*` / `secrets.h.example`）、**ADR-0012 字段契约 + `docs/server/` 四个 M1b 服务器侧产物**、**M1b 设备侧实现**（`health.h/.cpp` 双文档轮询与 19+5 字段门面、`main.cpp` 服务器屏两页 + 邮箱屏未读数 + 未读上升沿、`jsonfield.h/.cpp` 新增 `hasKey()`、`screen.*` 页码标题与 mailbox 段位）。**按用户规则，无明确授权不 commit / push**，等用户确认后一并提交。
 
 > 注：未提交改动中的 `HARDWARE.md` 是对仓库级文档的回写，`GLOSSARY.md` / `README.md` / ADR 是 status-oled3 内部同步，两者应一起提交以保持仓库一致。
 
