@@ -27,21 +27,25 @@ namespace jsonfield {
 
 namespace {
 
-// Does "key" appear as a whole key in the object? Textual, like findValue():
-// a quote before and a quote after. That is exact enough for flat,
-// machine-generated JSON, which is all this project polls.
+// Forward declaration: keyPresent() is a thin wrapper over findValue(), which
+// needs to be declared first for the definition order below.
+const char* findValue(const char* json, const char* key);
+
+// Does "key" appear as a whole key in the object, i.e. as `"key":`?
+//
+// This is the strict test: a key is only present when it is followed by a
+// colon, exactly as findValue() requires. An earlier version accepted a
+// closing quote alone, which made hasKey() weaker than field() and number()
+// -- a value containing the text "generated_at" (a commit message, an error
+// string) satisfied the gate for a key that was not there. Since hasKey() is
+// the gate that rejects "the nginx SPA catch-all answered with HTML", a gate
+// that is satisfied by the wrong document is worse than no gate.
+//
+// It delegates to findValue() rather than keeping its own scan: the two loops
+// used to be near-identical, and near-identical copies of a parser are how
+// the two drift apart.
 bool keyPresent(const char* json, const char* key) {
-  const size_t key_len = strlen(key);
-  const char* p = json;
-  while ((p = strstr(p, key)) != nullptr) {
-    const char* after = p + key_len;
-    if (p == json || p[-1] != '"' || *after != '"') {
-      p = after;
-      continue;
-    }
-    return true;
-  }
-  return false;
+  return findValue(json, key) != nullptr;
 }
 
 // Locate the value that follows "key": in a flat object.
@@ -50,6 +54,9 @@ bool keyPresent(const char* json, const char* key) {
 // whitespace and a colon. That is exact enough for flat, machine-generated
 // JSON, which is all this project polls.
 const char* findValue(const char* json, const char* key) {
+  if (json == nullptr || key == nullptr || key[0] == '\0') {
+    return nullptr;
+  }
   const size_t key_len = strlen(key);
   const char* p = json;
   while ((p = strstr(p, key)) != nullptr) {
@@ -75,6 +82,13 @@ const char* findValue(const char* json, const char* key) {
     p = after;
   }
   return nullptr;
+}
+
+// A character that can end a JSON value: end of buffer, or a structural byte.
+// Used to reject "12abc" as a number instead of reading it as 12.
+inline bool endsValue(char c) {
+  return c == '\0' || c == ',' || c == '}' || c == ']' || c == ' ' ||
+         c == '\t' || c == '\n' || c == '\r';
 }
 
 }  // namespace
@@ -135,6 +149,13 @@ bool number(const char* json, const char* key, double* out) {
   const double parsed = strtod(v, &end);
   if (end == v) {
     return false;  // nothing numeric at this position (true/false/null/{})
+  }
+  // The number must end where a JSON value ends. Without this, "12abc" parses
+  // as 12 -- strtod stops at 'a' and reports success. A hand-edited or
+  // partially-written document is exactly the case where a silently-accepted
+  // garbage number is worse than a rejected field.
+  if (!endsValue(*end)) {
+    return false;
   }
   *out = parsed;
   return true;
