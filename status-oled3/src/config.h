@@ -47,24 +47,28 @@ static const uint32_t I2C_TIMEOUT_MS = 50;
 static const uint8_t PCA9548A_ADDR = 0x70;
 
 // ------------------------------------------------------------------ screen topology
-// Bench reality, 2026-10-17: the PCA9548A module used to fail at 0x70 because
-// SDA/SCL were crossed (see the I2C note above); that is fixed and the mux is
-// back in the signal path. Development ran single-screen-direct while the
-// fault was being hunted, and that topology is still supported.
+// One knob: how many physical panels are actually wired.
 //
-// Development therefore runs single-screen-direct: the one panel is wired
-// directly to GPIO4/5 with NO mux in the signal path, and the firmware
-// paints the FOCUSED logical screen onto it. All three logical screens, both
-// pages, the data path and the buttons keep working -- only the number of
-// physical panels changes.
+// Bench history, because it is the reason this constant exists at all: the
+// PCA9548A module appeared dead at 0x70 for 36 hours because SDA/SCL were
+// crossed on the prototype (see the I2C note above). While that was being
+// hunted the firmware was switched to single-screen-direct -- one panel wired
+// straight to GPIO4/5, no mux in the path -- and that topology is still
+// supported. The crossing is fixed, the mux answers again, and the bench is
+// back on three screens.
 //
-// Returning to three screens is a one-line edit here, nothing else:
-//   ACTIVE_SCREENS = 3 -> the mux is back in the path, each logical screen
-//                         owns a channel and a panel (docs/adr/0001)
+// Returning to either topology is this one line, nothing else:
+//   ACTIVE_SCREENS = 3 -> the mux is in the path, each logical screen owns a
+//                         channel and a panel (docs/adr/0001)   [current]
 //   ACTIVE_SCREENS = 1 -> no mux; all logical screens share the one panel
 //                         and the buttons choose which one is shown
 // The mux is in the signal path exactly when this count is greater than 1,
 // so there is only one knob and no combination of settings that is wrong.
+//
+// Note the two paragraphs that used to sit here contradicted each other (one
+// said development ran single-screen-direct, the other that it therefore ran
+// single-screen-direct) while the value below said 3. The current state is
+// written once, here, and nowhere else claims otherwise.
 
 // ------------------------------------------------------------------ downstream screens
 // Role split per docs/adr/0001: ch0 = ESP32 status, ch1 = server, ch2 = mailbox.
@@ -125,6 +129,9 @@ static const uint32_t BUZZER_GAP_MS = 120;    // pause between repeated beeps
 //     data stops being repainted, so what stays on it is visibly the last
 //     real document rather than a clock counting up over stale numbers.
 static const uint32_t REFRESH_LOCAL_MS = 1000;    // ESP32 status screen
+// UNUSED: the data screens are not on a timer at all, they are repainted when
+// a document lands (see the comment above). It survived because it was once
+// read by a loop that has since been replaced by the dirty-flag dispatch.
 static const uint32_t REFRESH_REMOTE_MS = 15000;  // server screen (M1b)
 
 // Rate limit for the "[poll] body parsed but uptime missing" style warnings:
@@ -142,7 +149,8 @@ static const uint32_t RESCAN_INTERVAL_MS = 5000;
 // (docs/adr/0009); M1b replaces that one source with the two documents the
 // cron collectors write (docs/adr/0008), served by nginx under /status/.
 // Both live on the same host and the same TLS path, so TLS, the shared key
-// and the link check are shared (src/netfetch.cpp) and only the path and the
+// and the link check are shared (src/health.cpp; the M1a file that used to
+// hold them, netfetch.cpp, no longer exists) and only the path and the
 // cadence differ.
 //
 // /api/health is NOT polled any more. Keeping both shapes alive would mean
@@ -150,14 +158,19 @@ static const uint32_t RESCAN_INTERVAL_MS = 5000;
 // screen would have to explain where each number came from. The M1a code is
 // preserved in git history (commit 53218a2) if that source is ever needed
 // again.
-static const char* DATA_HOST = "www.siungo.top";
-static const char* DATA_PATH = "/status/snapshot.json";
-static const char* MAILBOX_PATH = "/status/mailbox.json";
+// The three string constants below are constexpr, not `static const char*`.
+// The static form is a pointer OBJECT in every translation unit that includes
+// this header, so screen.cpp/button.cpp/... each carried three dead pointers
+// and a matching -Wunused-variable warning under -Wall. A constexpr pointer is
+// a value: nothing to allocate, nothing to warn about.
+constexpr const char* DATA_HOST = "www.siungo.top";
+constexpr const char* DATA_PATH = "/status/snapshot.json";
+constexpr const char* MAILBOX_PATH = "/status/mailbox.json";
 
 // Shared key for M1b, sent as the X-Monitor-Key request header. EMPTY at
-// M1a because /api/health is public. Lives in src/secrets.h (gitignored),
-// never here.
-static const char* MONITOR_KEY_HEADER = "X-Monitor-Key";
+// M1a because /api/health is public. The key itself lives in src/secrets.h
+// (gitignored), never here; only the header NAME is a build constant.
+constexpr const char* MONITOR_KEY_HEADER = "X-Monitor-Key";
 
 // Poll cadence and staleness threshold (docs/adr/0004):
 //   poll every 15 s; 60 s without a valid response = "stale".
@@ -202,9 +215,21 @@ static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 // immediate retry).
 static const uint32_t HTTP_TIMEOUT_MS = 8000;
 
-// Size of the HTTP response buffer. /api/health answers with roughly 300
-// bytes; snapshot.json (M1b) is a flat JSON of ~20 short fields, so 1 KB is
-// generous while still cheap on the stack/static pool.
+// Size of the HTTP response buffer.
+//
+// 1 KiB is the budget BOTH sides are held to: docs/server/status-snapshot.py
+// writes the document (compact separators, no indent) and
+// docs/server/status-check.py verifies it still fits this constant -- there is
+// a size gate there, plus tools/snapshot-size-probe.py to measure the real
+// document. The reason it is worth a gate rather than a guess: a body that
+// grows past this cap is truncated by the read loop and then rejected by
+// looksComplete(), which on screen is indistinguishable from a dead server,
+// and the failure message the device can give ("body truncated at N bytes")
+// never mentions the size. The real 19-field document measures 385 bytes, so
+// there is room for about 2.5x growth before this bites.
+//
+// Growing the budget is cheap: these two buffers are 2 KiB of the 320 KB RAM,
+// and printStatus() reports the live size every minute.
 static const uint16_t HTTP_RESPONSE_MAX = 1024;
 
 // ---- M1b field presentation ------------------------------------------------
@@ -219,9 +244,11 @@ static const uint16_t HTTP_RESPONSE_MAX = 1024;
 // Both fall back to "-" when either side is missing/null, which is the only
 // correct answer: a percentage with an unknown denominator is not a number.
 //
-// The bars on the server screen are drawn from the same percentages, not
-// from absolute sizes, so these two constants are only a fallback for a
-// display that has no room for the percent text.
+// There are no bars on the server screen: the rows carry text, and a row of
+// '#' would cost more columns than the value it encodes. The three constants
+// below are therefore unused, and are kept only so the reasoning is on record
+// -- they were part of an earlier layout idea. Do not add a bar without
+// deleting them first, or the file will hold two answers to the same question.
 static const uint32_t MEM_BAR_KB = 4;     // one '#' per this many used MB of RAM
 static const uint32_t DISK_BAR_GB = 4;    // one '#' per this many used GB of disk
 static const uint8_t BAR_SEGMENTS = 21;   // 21 columns of 128 px at 6 px/char

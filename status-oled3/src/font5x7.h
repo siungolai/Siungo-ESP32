@@ -8,8 +8,12 @@
  *
  * WARNING: glyph direction and COMMAND scan direction are two independent
  * flips; either one can be "right" and they still may not agree. Before
- * flashing a new firmware, run the self-check in tools/font-dir-probe and
- * let the screen answer for itself; see src/font_dir.h.
+ * flashing a new firmware, run the self-check that used to live in
+ * tools/font-dir-probe and let the screen answer for itself. The probe
+ * itself was a 6 s blocking delay inside Ssd1306I2c::begin() and was removed
+ * for exactly that reason; the reasoning behind it is recorded in
+ * Ssd1306I2c::fontDirProbe() in src/ssd1306_i2c.cpp, which keeps a
+ * non-blocking stub for the same purpose.
  */
 #pragma once
 

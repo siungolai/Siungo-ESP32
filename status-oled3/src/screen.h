@@ -45,10 +45,19 @@ constexpr uint8_t PHYSICAL_COUNT = config::ACTIVE_SCREENS;
 // Whether this screen is currently visible. With three panels every screen is
 // visible; with one panel only the focused one is. Callers must use this
 // instead of online() when deciding what to paint.
+//
+// Note that "visible" is a strictly stronger condition than "online" here: in
+// the single-panel topology a dirty non-focused screen is online but must NOT
+// be painted, because the panel it would land on is showing the focused one.
 bool showable(ScreenId id);
 
 // Paint the focused screen onto the shared panel (single-screen topology).
 // No-op when PHYSICAL_COUNT > 1: each screen already owns a panel.
+//
+// UNUSED: focus changes go through setFocused() + invalidate() in main.cpp.
+// Kept as a declared-but-uncalled symbol on purpose (see the note in the .cpp)
+// rather than deleted, because deleting a public symbol is outside the scope
+// of the change that deprecated it.
 void showFocused();
 
 // Current page of one screen. A page is one "screenful" of content; pages of
@@ -87,6 +96,13 @@ bool isDirty(ScreenId id);
 // Redraw all screens that are dirty and online.
 // Each screen's draw happens in the draw* callback supplied by the caller,
 // so the "what does this screen show" knowledge lives outside this layer.
+//
+// UNUSED by main.cpp, which runs its own dispatch (renderScreen() in
+// src/main.cpp) because it has to draw the CONTENT and then flush, not just
+// flush. Kept for the same reason as showFocused(): removing a public symbol
+// is wider than this change. If it is ever called again, note that its gate
+// is online() while main.cpp's is showable() -- in the single-panel topology
+// that difference pushes a non-focused screen onto the shared panel.
 void update();
 
 // Text primitive: clear the whole framebuffer and move the cursor home.

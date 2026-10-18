@@ -60,6 +60,13 @@ bool select(uint8_t channel);
 // In the single-screen-direct topology this is a no-op.
 void deselectAll();
 
+// Diagnostics only. Both are UNUSED by the firmware: nothing in this project
+// reads them, because the screen layer already turns "no ACK" into an offline
+// screen and that is the state the user sees. They exist for a bench session
+// where the bus itself is suspect, and are kept for the same reason as
+// screen::showFocused(): deleting a public symbol is wider than the change
+// that deprecated it.
+
 // The currently selected channel; 8 means nothing is selected.
 uint8_t currentChannel();
 

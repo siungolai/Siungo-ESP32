@@ -177,19 +177,23 @@ bool showable(ScreenId id) {
     return false;  // absent panel: nothing to paint on
   }
   // One panel cannot show three screens at once. Only the focused one is
-  // showable, and it is the caller's job to route focus changes through
-  // showFocused() so this panel actually repaints.
+  // showable, and the caller repaints it by invalidating it on focus change
+  // (main.cpp onButtonFocus()).
   if (PHYSICAL_COUNT <= 1) {
     return id == g_focused;
   }
   return true;
 }
 
+// Deprecated and uncalled: focus changes go through setFocused() plus
+// invalidate() on every screen, which main.cpp owns. It is kept only because
+// removing a public symbol is a wider change than this review is allowed to
+// make, and it is documented here so the next reader does not have to grep
+// for callers to find out. Do not call it: it sets one dirty flag and the
+// comment above it used to promise behaviour the body never had (marking the
+// other screens clean), which is exactly the kind of divergence that costs a
+// debugging session. Single entry point for focus changes is setFocused().
 void showFocused() {
-  // One panel, many logical screens: the focused one takes over the panel.
-  // The previously visible one is not "cleared" -- it is simply no longer
-  // painted, and the next showFocused() on it overwrites the panel fully
-  // (every draw* path starts with drawTitleBar(), which calls clear()).
   if (PHYSICAL_COUNT > 1) {
     return;
   }
@@ -199,8 +203,6 @@ void showFocused() {
   if (!g_screens[g_focused].online) {
     return;
   }
-  // Force a repaint of the newly visible screen and hide the stale content of
-  // the other two from the panel: mark them clean so nothing pushes them.
   g_screens[g_focused].dirty = true;
 }
 
@@ -211,6 +213,13 @@ bool online(ScreenId id) {
   return g_screens[static_cast<uint8_t>(id)].online;
 }
 
+// Two clearing paths exist on purpose and they are not interchangeable:
+//   clear()            -- public, offline-gated, marks the screen dirty
+//   s.oled->clear()    -- framebuffer only, no bus transaction, no gate
+// drawTitleBar() uses the second one because it runs AFTER select(), where
+// taking the public one would deselect the channel it is about to draw on
+// (and, in the single-panel topology, double-book the panel). If you are
+// adding a third caller, pick deliberately.
 void clear(ScreenId id) {
   if (!validId(id)) {
     return;
