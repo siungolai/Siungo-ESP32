@@ -24,6 +24,7 @@ namespace {
 constexpr size_t kChunkPayload = 64;
 
 // How long the glyph-direction self-check pattern stays on screen (ms).
+// Only used by fontDirProbe(), which is now an explicit bench-only call.
 constexpr uint32_t kFontDirProbeMs = 6000;
 
 // Find this codepoint in the Chinese glyph table and return its 32-byte
@@ -137,20 +138,28 @@ bool Ssd1306I2c::begin() {
 
   clear();
   flush();
-  fontDirProbe();
+  // fontDirProbe() used to be called here. It blocks for kFontDirProbeMs,
+  // which made every begin() -- and therefore every screen::rescan() and all
+  // of setup() -- cost 6 s per screen. It is a one-shot bench check, so it is
+  // now the caller's explicit choice; see the header.
   return true;
 }
 
 // ------------------------------------------------------------------ glyph direction self-check
 
 void Ssd1306I2c::fontDirProbe() {
-  // Draw only vertical bars; do not touch glyphs. Reason (see font_dir.h):
-  // if a banner used 16x16 glyphs to check glyph direction, that would mean
-  // "using possibly mirrored ink to write the very words that check
-  // direction", and the check itself becomes unreliable.
+  // Draw only vertical bars; do not touch glyphs. Reason: if a banner used
+  // 16x16 glyphs to check glyph direction, that would mean "using possibly
+  // mirrored ink to write the very words that check direction", and the check
+  // itself becomes unreliable.
   // Two same-length (4-row) bars, 14 rows apart vertically; on screen the
   // answer "which bar is farther from the vertical center" is evidence from
   // the screen itself, independent of glyph orientation.
+  //
+  // NOTE: this function still blocks for kFontDirProbeMs. That is the point
+  // of it -- a human is looking at the screen -- but it is the reason it must
+  // never be called from begin(). It used to be, and every rescan of an
+  // absent screen then cost 6 s of frozen buttons and frozen refresh.
   auto vbar = [this](uint8_t x, uint8_t y, uint8_t h) {
     for (uint8_t i = 0; i < h; ++i) {
       if (static_cast<uint16_t>(y) + i >= OLED_HEIGHT) {

@@ -22,10 +22,15 @@
 #include <stdint.h>
 
 // ------------------------------------------------------------------ constants
-static const uint8_t OLED_WIDTH = 128;
-static const uint8_t OLED_HEIGHT = 64;
-static const uint8_t OLED_PAGES = OLED_HEIGHT / 8;  // 8 pages
-static const uint16_t OLED_BUFFER_SIZE =
+// constexpr, not `static const`: these four are used as array bounds
+// (buf_[OLED_BUFFER_SIZE]) and in constant expressions, so they must have
+// internal linkage without being objects. The `static const uint8_t` spelling
+// that was here before created one copy per translation unit and, on some
+// toolchains, an odr-use warning where a constant expression was required.
+constexpr uint8_t OLED_WIDTH = 128;
+constexpr uint8_t OLED_HEIGHT = 64;
+constexpr uint8_t OLED_PAGES = OLED_HEIGHT / 8;  // 8 pages
+constexpr uint16_t OLED_BUFFER_SIZE =
     static_cast<uint16_t>(OLED_WIDTH) * OLED_PAGES;  // 1024 bytes
 
 // SSD1306 command codes (only the ones this driver uses)
@@ -111,8 +116,14 @@ class Ssd1306I2c {
   void flush();
 
   // Glyph direction self-check: lights two 1x4 vertical bars 14 rows apart,
-  // clears the screen after 6 s. Called automatically by begin(). How to
-  // read the result: see src/font_dir.h.
+  // then waits kFontDirProbeMs and clears. Blocks for that whole time, so it
+  // is NOT called by begin() -- it is a human-run, once-per-board check, and
+  // wiring it into the bringup path cost 6 s per screen on every rescan
+  // (18 s in setup() at three screens). Call it explicitly from a bench
+  // sketch. How to read the result: the two bars must appear as vertical bars;
+  // if they read as horizontal dashes the command scan direction is flipped.
+  // The full story is in the .cpp, where the function body records what it
+  // draws and why that distinguishes the two failure modes.
   void fontDirProbe();
 
   // ---- low level ----
