@@ -26,7 +26,9 @@ namespace health {
 void begin();
 
 // Advances the state machine: WiFi upkeep, link verification, and one poll
-// when a document comes due. Never blocks longer than one HTTP request.
+// when a document comes due. Blocks for as long as one WiFi connect attempt
+// (WIFI_CONNECT_TIMEOUT_MS) plus one HTTP request -- both only in the state
+// where the link is down, which is the state where waiting is correct.
 void update();
 
 // ---- network state -------------------------------------------------------
@@ -65,9 +67,14 @@ uint32_t mailboxSecondsSinceData();
 // Only meaningful when mailboxUnreadKnown(); drives the new-mail buzzer.
 bool unreadRose();
 
-// Diagnostics: how many times each document was fetched successfully.
+// Diagnostics: how many times each document was fetched successfully, and the
+// byte length of each body currently published (the 1 KiB ceiling is
+// config::HTTP_RESPONSE_MAX; a body that ever reaches it is truncated and
+// permanently rejected, and this is the number that shows it coming).
 uint32_t pollCount();
 uint32_t mailboxPollCount();
+uint16_t snapshotLen();
+uint16_t mailboxLen();
 
 // One-line serial summary (net/link/staleness/age/counters).
 void printStatus();

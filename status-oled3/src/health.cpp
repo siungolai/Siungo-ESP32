@@ -40,6 +40,7 @@
 
 #include <cmath>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -47,11 +48,26 @@
 #include "jsonfield.h"
 #include "secrets.h"
 
-#include <errno.h>
-
 namespace health {
 
 namespace {
+
+// ---- time ------------------------------------------------------------------
+// One elapsed-time comparison for the whole file, and the only kind used.
+//
+// millis() is a uint32_t that wraps every 49.7 days. The subtraction
+// `now - start` is computed in uint32_t, so across a wrap it yields the true
+// small positive difference rather than a huge negative one, and
+// `>= timeout` keeps working. A desktop device that runs for weeks hits the
+// wrap as a certainty, not as a theory.
+//
+// The alternative that was here once -- `static_cast<int32_t>(millis() -
+// deadline) >= 0` in connectWifi() -- turns negative at the wrap, so the
+// timeout never fires and the connect loop spins forever. Both spellings
+// cannot be allowed to coexist in one file.
+inline uint32_t elapsed(uint32_t now, uint32_t start) {
+  return now - start;
+}
 
 // ---- link state -----------------------------------------------------------
 bool g_net_online = false;
@@ -88,6 +104,14 @@ bool g_mailbox_ever_succeeded = false;
 // answers "no value" instead of needing a separate has-fetched flag.
 char g_snapshot[config::HTTP_RESPONSE_MAX] = {0};
 char g_mailbox[config::HTTP_RESPONSE_MAX] = {0};
+
+// Bytes actually published in each buffer. The buffers are always fully
+// NUL-terminated at [len], so jsonfield needs nothing from these two numbers
+// -- they exist for the diagnostics below (printStatus reports the real
+// document size, which is the only way to see a 1024-byte ceiling being
+// approached before it starts rejecting documents).
+uint16_t g_snapshot_len = 0;
+uint16_t g_mailbox_len = 0;
 
 // ---- new-mail edge detection ----------------------------------------------
 // Double slot with a one-poll lag (docs/adr/0011). g_unread_* is the value
@@ -147,10 +171,16 @@ void rememberFailure(const char* why, const char* body) {
 // POLL_WARN_INTERVAL_MS. A poll that fails is normal and already visible on
 // the screen as a rising age counter; a poll that keeps failing is the thing
 // worth reading about, and it needs one line per minute, not four per minute.
+//
+// Unsigned subtraction on purpose: millis() wraps every 49.7 days and the
+// unsigned difference stays correct across the wrap (now - last is a small
+// positive number when now has wrapped past last, and a huge one otherwise).
+// A signed comparison would invert at the wrap and either spam the log or
+// never log again -- see elapsed() above.
 void logFailure(const char* why) {
   const uint32_t now = millis();
   if (g_last_fail_log_ms != 0 &&
-      now - g_last_fail_log_ms < config::POLL_WARN_INTERVAL_MS) {
+      elapsed(now, g_last_fail_log_ms) < config::POLL_WARN_INTERVAL_MS) {
     return;
   }
   g_last_fail_log_ms = now;
@@ -262,9 +292,14 @@ void connectWifi() {
   WiFi.setSleep(false);  // no power saving: it adds jitter to the TLS round trip
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  const uint32_t deadline = millis() + config::WIFI_CONNECT_TIMEOUT_MS;
+  // The deadline arithmetic itself must also survive the wrap: millis() +
+  // WIFI_CONNECT_TIMEOUT_MS overflows when millis() is within 15 s of
+  // 0xFFFFFFFF. Storing the start time and comparing against a constant
+  // avoids the overflow entirely, which is why the deadline is spelled this
+  // way.
+  const uint32_t start_ms = millis();
   while (WiFi.status() != WL_CONNECTED) {
-    if (static_cast<int32_t>(millis() - deadline) >= 0) {
+    if (elapsed(millis(), start_ms) >= config::WIFI_CONNECT_TIMEOUT_MS) {
       Serial.println("wifi: timeout, will retry");
       g_net_online = false;
       return;
@@ -312,7 +347,13 @@ void connectWifi() {
 //   - Pinning the server's own chain (the upgrade that keeps verification on)
 //     is deferred to M2, where the certificate lifecycle already has to be
 //     tracked by hand (the cert is renewed manually, ADR-0006).
-bool fetchOnce(const char* path, char* body, size_t cap) {
+// Returns the number of bytes actually read (the strlen of body), or -1 on
+// failure. The count matters: the caller copies the body into the global
+// snapshot buffer, and copying sizeof(buffer) instead of the real length would
+// drag the uninitialised tail of this static buffer along -- after any request
+// shorter than the previous one, that tail is stale bytes from the last longer
+// document, and jsonfield would read them as the current one.
+int fetchOnce(const char* path, char* body, size_t cap) {
   WiFiClientSecure client;
   client.setTimeout(config::HTTP_TIMEOUT_MS / 1000);
   client.setInsecure();
@@ -321,7 +362,7 @@ bool fetchOnce(const char* path, char* body, size_t cap) {
   String url = String("https://") + config::DATA_HOST + path;
   if (!http.begin(client, url)) {
     rememberFailure("http.begin() failed", nullptr);
-    return false;
+    return -1;
   }
   http.setTimeout(config::HTTP_TIMEOUT_MS);
   // M1b sends the shared key; an empty MONITOR_KEY (pre-deployment) simply
@@ -342,7 +383,7 @@ bool fetchOnce(const char* path, char* body, size_t cap) {
       rememberFailure(msg, nullptr);
     }
     http.end();
-    return false;
+    return -1;
   }
 
   // Read at most cap-1 bytes so the buffer stays NUL-terminated.
@@ -366,7 +407,7 @@ bool fetchOnce(const char* path, char* body, size_t cap) {
 
   if (n == 0) {
     rememberFailure("empty body", body);
-    return false;
+    return -1;
   }
   // The chunked framing is the server's business, not ours -- but the
   // response must not still be a full HTTP message. If the headers are in
@@ -374,9 +415,22 @@ bool fetchOnce(const char* path, char* body, size_t cap) {
   // whole thing as JSON would silently reject every document.
   if (strstr(body, "\r\n\r\n") != nullptr) {
     rememberFailure("response body still contains HTTP headers", body);
-    return false;
+    return -1;
   }
-  return true;
+  // A body that stops exactly at cap-1 is a truncation, not a document. It
+  // would be rejected downstream by looksComplete(), but reporting it here
+  // names the actual cause ("the document grew past HTTP_RESPONSE_MAX") in
+  // the one line an operator reads. Without this the symptom is a permanent
+  // "stale" with a reason nobody can diagnose.
+  if (n + 1 >= cap) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "body truncated at %u bytes (max %u)",
+             static_cast<unsigned>(n), static_cast<unsigned>(cap));
+    rememberFailure(msg, nullptr);
+    logFailure(msg);
+    return -1;
+  }
+  return static_cast<int>(n);
 }
 
 // One poll of snapshot.json. Two gates, in this order:
@@ -395,7 +449,8 @@ bool fetchOnce(const char* path, char* body, size_t cap) {
 void pollSnapshot() {
   static char body[config::HTTP_RESPONSE_MAX];
 
-  if (!fetchOnce(config::DATA_PATH, body, sizeof(body))) {
+  const int n = fetchOnce(config::DATA_PATH, body, sizeof(body));
+  if (n < 0) {
     return;  // failure: no state change beyond "not fresh" (no immediate retry)
   }
 
@@ -423,7 +478,12 @@ void pollSnapshot() {
     return;
   }
 
-  memcpy(g_snapshot, body, sizeof(g_snapshot));
+  // Copy exactly the bytes read, NUL included. Copying sizeof(g_snapshot)
+  // would also work (both buffers are HTTP_RESPONSE_MAX), but only by
+  // accident: it would publish whatever this static buffer still held from a
+  // previous, longer document, and jsonfield reads that tail as content.
+  memcpy(g_snapshot, body, static_cast<size_t>(n) + 1);
+  g_snapshot_len = static_cast<uint16_t>(n);
   g_last_success_ms = millis();
   g_poll_count++;
   g_ever_succeeded = true;
@@ -440,14 +500,25 @@ void pollSnapshot() {
 void pollMailbox() {
   static char body[config::HTTP_RESPONSE_MAX];
 
-  if (!fetchOnce(config::MAILBOX_PATH, body, sizeof(body))) {
+  const int n = fetchOnce(config::MAILBOX_PATH, body, sizeof(body));
+  if (n < 0) {
     return;
   }
 
-  // available is the field that says this document is the mailbox document
-  // (0/1 per ADR-0012). Without it the body is not ours. Note that
-  // available=0 is a legitimate value (no credentials configured), so the
-  // test is "is the key there with a number", not "is it 1".
+  // Two gates, in this order:
+  //   1. looksComplete() -- the body is a whole flat JSON object and nothing
+  //      else. A truncated read would otherwise be adopted as the last known
+  //      good state and every field past the cut would read as null forever,
+  //      and a null on screen means "the collector could not measure", which
+  //      would be a lie (ADR-0012: a document is either complete or absent).
+  //   2. jsonfield::number(body, "available") -- the body is the mailbox
+  //      document and not something else (0/1 per ADR-0012).
+  //
+  // The order here is the opposite of pollSnapshot()'s, and that is
+  // deliberate rather than sloppy: available is the cheap, decisive test (one
+  // strstr scan) while looksComplete() walks the whole body, so the mailbox
+  // path pays the full scan only for a body that already looks like its own
+  // document. Both orders reject the same set of bodies.
   double available = 0.0;
   if (!jsonfield::number(body, "available", &available)) {
     rememberFailure("mailbox body without available; not counted as data",
@@ -459,7 +530,9 @@ void pollMailbox() {
     return;
   }
 
-  memcpy(g_mailbox, body, sizeof(g_mailbox));
+  // Same rule as pollSnapshot(): copy the bytes actually read.
+  memcpy(g_mailbox, body, static_cast<size_t>(n) + 1);
+  g_mailbox_len = static_cast<uint16_t>(n);
   g_last_mailbox_success_ms = millis();
   g_mailbox_poll_count++;
   g_mailbox_ever_succeeded = true;
@@ -513,7 +586,9 @@ void begin() {
   g_ever_succeeded = false;
   g_mailbox_ever_succeeded = false;
   g_snapshot[0] = '\0';
+  g_snapshot_len = 0;
   g_mailbox[0] = '\0';
+  g_mailbox_len = 0;
   g_unread = 0;
   g_prev_unread = 0;
   g_unread_known = false;
@@ -527,17 +602,48 @@ void update() {
   const uint32_t now = millis();
 
   // ---- link upkeep (slower cadence: a connect attempt blocks) ----
-  if (!g_net_online && now - g_last_wifi_check_ms >=
-                           config::WIFI_CHECK_INTERVAL_MS) {
-    g_last_wifi_check_ms = now;
-    connectWifi();
-    if (g_net_online) {
-      // Poll immediately on a fresh link instead of waiting out the
-      // interval: the user just watched the network come back. Both
-      // documents, because a five-minute-old mailbox is as stale as it gets
-      // after a reconnect.
-      g_last_poll_ms = 0;
-      g_last_mailbox_poll_ms = 0;
+  // Two separate reasons to re-check the link, and both go through the same
+  // cadence:
+  //   a) not associated        -> connectWifi() (associate, then verify)
+  //   b) associated, no route  -> verifyLink() only
+  //
+  // (b) is the state measured on the bench 2026-10-17: the WiFi stack keeps
+  // reporting WL_CONNECTED, so nothing here ever notices. Before this branch
+  // existed, the only caller of verifyLink() was connectWifi(), which only
+  // runs in case (a) -- so "associated but no route out" was a latch: no
+  // polls, no re-verification, no recovery until the association itself
+  // dropped. It needed a power cycle to escape.
+  if (!g_net_online || !g_link_verified) {
+    if (elapsed(now, g_last_wifi_check_ms) >= config::WIFI_CHECK_INTERVAL_MS) {
+      g_last_wifi_check_ms = now;
+      if (g_net_online) {
+        // Associated but unproven: re-probe only. Do not call connectWifi(),
+        // which would tear down a healthy association to rebuild it.
+        Serial.println("wifi: re-verifying link (was: no route out)");
+        const bool ok = verifyLink();
+        if (ok != g_link_verified) {
+          g_link_verified = ok;
+          if (ok) {
+            Serial.println("wifi: route out restored");
+          } else {
+            Serial.println("wifi: still no route out");
+          }
+        }
+      } else {
+        connectWifi();
+      }
+      if (g_net_online && g_link_verified) {
+        // Poll immediately on a fresh link instead of waiting out the
+        // interval: the user just watched the network come back. Both
+        // documents, because a five-minute-old mailbox is as stale as it gets
+        // after a reconnect.
+        //
+        // Zero is the "poll now" sentinel, and it is safe here because the
+        // poll cadence below compares elapsed() against these two, never
+        // their absolute value.
+        g_last_poll_ms = 0;
+        g_last_mailbox_poll_ms = 0;
+      }
     }
   }
   if (WiFi.status() != WL_CONNECTED && g_net_online) {
@@ -563,10 +669,10 @@ void update() {
   // Mailbox first when both come due: it is the rarer document, and if the
   // snapshot fetch were allowed to consume the iteration the mailbox could
   // be starved on a slow link for as long as the snapshot keeps failing.
-  if (now - g_last_mailbox_poll_ms >= config::MAILBOX_INTERVAL_MS) {
+  if (elapsed(now, g_last_mailbox_poll_ms) >= config::MAILBOX_INTERVAL_MS) {
     g_last_mailbox_poll_ms = now;
     pollMailbox();
-  } else if (now - g_last_poll_ms >= config::POLL_INTERVAL_MS) {
+  } else if (elapsed(now, g_last_poll_ms) >= config::POLL_INTERVAL_MS) {
     g_last_poll_ms = now;
     pollSnapshot();
   }
@@ -587,14 +693,14 @@ bool stale() {
   if (!g_ever_succeeded) {
     return true;
   }
-  return (millis() - g_last_success_ms) >= config::STALE_AFTER_MS;
+  return elapsed(millis(), g_last_success_ms) >= config::STALE_AFTER_MS;
 }
 
 uint32_t secondsSinceData() {
   if (!g_ever_succeeded) {
     return 0;
   }
-  return (millis() - g_last_success_ms) / 1000UL;
+  return elapsed(millis(), g_last_success_ms) / 1000UL;
 }
 
 bool hasNumber(const char* key) {
@@ -665,7 +771,7 @@ bool mailboxStale() {
   if (!g_mailbox_ever_succeeded) {
     return true;
   }
-  return (millis() - g_last_mailbox_success_ms) >=
+  return elapsed(millis(), g_last_mailbox_success_ms) >=
          config::MAILBOX_STALE_AFTER_MS;
 }
 
@@ -673,7 +779,7 @@ uint32_t mailboxSecondsSinceData() {
   if (!g_mailbox_ever_succeeded) {
     return 0;
   }
-  return (millis() - g_last_mailbox_success_ms) / 1000UL;
+  return elapsed(millis(), g_last_mailbox_success_ms) / 1000UL;
 }
 
 bool unreadRose() {
@@ -688,11 +794,24 @@ bool unreadRose() {
 }
 
 uint32_t pollCount() {
+  // Zero callers in the firmware: main.cpp reads the count through
+  // handleEdges() to detect a poll landing, which is the same variable via a
+  // different route. Kept because a counter with no reader is how a future
+  // "why did the screen not repaint" question gets answered, and because
+  // removing a public symbol is wider than the change that deprecated it.
   return g_poll_count;
 }
 
 uint32_t mailboxPollCount() {
   return g_mailbox_poll_count;
+}
+
+uint16_t snapshotLen() {
+  return g_snapshot_len;
+}
+
+uint16_t mailboxLen() {
+  return g_mailbox_len;
 }
 
 void printStatus() {
@@ -701,13 +820,14 @@ void printStatus() {
   // rather than overflowing.
   char line[config::LOG_LINE_MAX];
   snprintf(line, sizeof(line),
-           "net=%s%s snap=%s age=%lus polls=%lu mail=%s age=%lus polls=%lu "
-           "unread=%s",
+           "net=%s%s snap=%s age=%lus polls=%lu len=%u mail=%s age=%lus "
+           "polls=%lu unread=%s",
            g_net_online ? "up" : "down",
            g_net_online ? (g_link_verified ? "" : "/no-route") : "",
            stale() ? "STALE" : "fresh",
            static_cast<unsigned long>(secondsSinceData()),
            static_cast<unsigned long>(g_poll_count),
+           static_cast<unsigned>(g_snapshot_len),
            mailboxStale() ? "STALE" : "fresh",
            static_cast<unsigned long>(mailboxSecondsSinceData()),
            static_cast<unsigned long>(g_mailbox_poll_count),
