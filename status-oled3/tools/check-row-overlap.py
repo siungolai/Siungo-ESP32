@@ -33,8 +33,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MAIN = ROOT / "src" / "main.cpp"
 
-# printKV/kvNumber/kvString all funnel into screen::printLine.
-DRAW_CALL = r"(?:printKV|kvNumber|kvString)"
+# Every call that writes one row of text. printKV/kvNumber/kvString funnel
+# into screen::printLine, and screen::printLine is in this set too: a caller
+# that goes straight to it (rather than through the three wrappers) must be
+# seen by this checker, or the one layout bug it exists to catch is silent
+# exactly where the code took a new path.
+DRAW_CALL = r"(?:printKV|kvNumber|kvString|printLine)"
 
 # The row argument is one of:
 #   5                              a literal
@@ -97,9 +101,11 @@ def probe_count(body):
 def scan_draws(body):
     """List (row, label) for every string this body writes.
 
-    Detection is by "the variable named <label>_label is drawn", not by the
-    index i: the row-to-label mapping uses the loop variable, so parsing the
-    call alone would give the wrong name.
+    The label is the string in the row-writing position, which is the same
+    slot in every call shape this checker knows:
+      printKV(id, row, "key", value)   -> "key"  (what the operator reads)
+      printLine(id, row, "text")       -> "text"
+    so one pattern covers both and no per-call special case is needed.
     """
     entries = []
     n = probe_count(body)
