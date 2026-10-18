@@ -14,24 +14,33 @@
  *
  * M1b scope (docs/adr/0012): the server screen becomes two pages of real
  * snapshot.json fields and the mailbox screen becomes real mailbox.json
- * values, plus the third buzzer edge (new mail). The server side is NOT
- * deployed by this change: the device is built to the contract and points
- * at the real host, so a 403 (key not switched on yet) shows up as
- * "data: no data yet" rather than as a firmware bug.
+ * values, plus the third buzzer edge (new mail). The server side is deployed
+ * (README.md: M1b 已上线 2026-10-17); the 403 path stays in the code because
+ * it is the correct behaviour for a key that is not switched on yet, not a
+ * placeholder.
  *
  * Structure: five independent cadences sharing one loop().
  *   - buttons: drained every iteration (a missed press is a lost press)
- *   - network: 15 s snapshot poll, 5 min mailbox poll, 5 s link check
+ *   - network: 15 s snapshot poll, 5 min mailbox poll, 5 s link re-check
  *   - ESP32 status screen: 1 s (uptime changes every second)
- *   - the other two screens: only when invalidated
+ *   - the other two screens: only when a poll lands or focus moves
  * The screen layer owns the dirty flag, so an iteration with nothing to do
  * costs no I2C traffic at all.
+ *
+ * "Only when a poll lands" is enforced in handleEdges(): the two data screens
+ * are invalidated on the TRANSITION into each state, not while it persists.
+ * An earlier version invalidated them on every loop() while the link was up,
+ * which turned the data screens into a busy-redraw loop and made the claim
+ * above false.
  */
 #include <Arduino.h>
 #include <WiFi.h>
 
 #include <cmath>
 #include <cstdio>
+// strlen() is used by the boot report; it comes in through Arduino.h on this
+// platform, but include it explicitly rather than rely on that.
+#include <cstring>
 
 #include "button.h"
 #include "buzzer.h"
@@ -41,6 +50,19 @@
 #include "screen.h"
 
 namespace {
+
+// Elapsed time in ms, correct across the millis() wrap (49.7 days). The
+// subtraction is done in uint32_t, so a wrapped "now" still yields the true
+// small positive difference. Every cadence in this file compares against a
+// threshold, never against 0, which is what makes the unsigned form safe.
+//
+// It lives here rather than at file scope so that it stays private to this
+// translation unit: main.cpp is the only file that schedules anything, and
+// duplicating a wrap-safe comparison helper in a header would invite the two
+// copies to drift apart (health.cpp has its own for the same reason).
+inline uint32_t elapsedSince(uint32_t now, uint32_t start) {
+  return now - start;
+}
 
 // ---- focus / page state (the M0 interaction model) ------------------------
 // Which screen currently answers to the buttons. Power-on default is the
@@ -55,6 +77,11 @@ screen::ScreenId g_focus = screen::SCREEN_LOCAL;
 // The counts are fixed by the ADR, not derived from what happens to be
 // non-null today: a field that is null must still occupy its row, or the
 // layout would shift under the user when one collector breaks.
+//
+// This is the second copy of the truth: screen::setPageCount() stores the same
+// numbers inside the screen layer, and screen::pageCount() is the read side.
+// main.cpp pushes them once in setup() and never reads them back; the array
+// exists so the push is a table instead of three calls.
 uint8_t g_page_count[screen::SCREEN_COUNT] = {1, 2, 1};
 
 // ---- refresh timing -------------------------------------------------------
@@ -74,6 +101,10 @@ uint32_t g_last_netlog_ms = 0;
 bool g_prev_net_online = true;
 bool g_prev_link_usable = false;
 bool g_prev_stale = false;
+// Rising-edge detectors for the two poll counters, so the data screens are
+// invalidated exactly when new data lands (see handleEdges).
+uint32_t g_prev_poll_count = 0;
+uint32_t g_prev_mailbox_poll_count = 0;
 
 // A screen unplugged and replugged should come back on its own.
 constexpr uint32_t kRescanIntervalMs = config::RESCAN_INTERVAL_MS;
@@ -115,6 +146,19 @@ void formatKb(char* out, size_t n, double kb) {
   } else {
     snprintf(out, n, "%luK", static_cast<unsigned long>(kb));
   }
+}
+
+// "used/total" as two formatKb() halves in one buffer: the memory and disk
+// rows. Written as one snprintf instead of formatKb + writing a '/' into the
+// buffer + a second formatKb into the remainder -- that form is only safe
+// because formatKb is short, and it silently assumes the caller knows how
+// much room is left. snprintf states the bound.
+void formatPair(char* out, size_t n, double a, double b) {
+  char left[16];
+  char right[16];
+  formatKb(left, sizeof(left), a);
+  formatKb(right, sizeof(right), b);
+  snprintf(out, n, "%s/%s", left, right);
 }
 
 // A percentage with an unknown denominator is not a number (ADR-0012): a
@@ -198,17 +242,21 @@ void drawLocal() {
   screen::printKV(screen::SCREEN_LOCAL, 3, "heap", buf);
 
   // Screen presence is the M0 headline result, so it gets its own line
-  // rather than being buried in the serial log.
-  char online_flags[5];
+  // rather than being buried in the serial log. Four bytes: three flags plus
+  // the terminator. (Four, not five -- an earlier version sized it 5 and left
+  // the last byte unused, which reads as a miscount.)
+  char online_flags[4];
   online_flags[0] = screen::online(screen::SCREEN_LOCAL) ? '1' : '0';
   online_flags[1] = screen::online(screen::SCREEN_SERVER) ? '1' : '0';
   online_flags[2] = screen::online(screen::SCREEN_MAILBOX) ? '1' : '0';
   online_flags[3] = '\0';
   screen::printKV(screen::SCREEN_LOCAL, 4, "scr", online_flags);
 
-  // IP: the last octet only -- a full dotted quad does not fit next to a
-  // label at 6 px per character, and the last octet is what tells two
-  // devices apart on the same network.
+  // The full dotted quad, not the last octet: an earlier revision printed
+  // only the last octet on the assumption that a full quad does not fit. It
+  // does -- "ip=192.168.1.100" is 18 characters x 6 px = 108 px of the 128 px
+  // width -- and the full address is what you need to reach the device, so
+  // the octet-only version was the wrong trade.
   if (health::netOnline()) {
     const IPAddress ip = WiFi.localIP();
     snprintf(buf, sizeof(buf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
@@ -238,10 +286,12 @@ void drawServerPage1() {
   screen::printKV(screen::SCREEN_SERVER, 2, "mem", buf);
 
   char sizes[32];
-  formatKb(sizes, sizeof(sizes), mem_used);
-  const size_t sizes_len = strlen(sizes);
-  sizes[sizes_len] = '/';
-  formatKb(sizes + sizes_len + 1, sizeof(sizes) - sizes_len - 1, mem_total);
+  // "used/total" in one buffer. Written as a single bounded snprintf rather
+  // than formatKb + manual '/' + second formatKb: the previous form wrote
+  // sizes[strlen(sizes)] = '/' with no check that anything was left, which is
+  // only safe because formatKb happens to be short. snprintf makes the bound
+  // explicit and cannot be broken by a future change to formatKb.
+  formatPair(sizes, sizeof(sizes), mem_used, mem_total);
   screen::printKV(screen::SCREEN_SERVER, 3, "sz", sizes);
 
   // Swap: shown only as a percentage, because a swap partition is either
@@ -272,10 +322,8 @@ void drawServerPage2() {
   screen::printKV(screen::SCREEN_SERVER, 1, "disk", buf);
 
   char sizes[32];
-  formatKb(sizes, sizeof(sizes), disk_used);
-  const size_t sizes_len = strlen(sizes);
-  sizes[sizes_len] = '/';
-  formatKb(sizes + sizes_len + 1, sizeof(sizes) - sizes_len - 1, disk_total);
+  // See drawServerPage1(): one bounded snprintf, no manual splicing.
+  formatPair(sizes, sizeof(sizes), disk_used, disk_total);
   screen::printKV(screen::SCREEN_SERVER, 2, "sz", sizes);
 
   // Interface name only: the byte counters stay strings because a 64-bit
@@ -594,10 +642,20 @@ void handleEdges() {
     Serial.println("edge: new mail");
   }
 
-  // The data screens only change when a poll lands or focus moves, so they
-  // are invalidated here rather than on a timer. Both documents: the mailbox
-  // screen has its own cadence and must repaint when its own poll lands.
-  if (net_online) {
+  // The data screens change when a poll lands -- that is the event, not
+  // "the link is up". health::pollCount()/mailboxPollCount() are the counters
+  // that move exactly then, so a rising count is the invalidate trigger.
+  //
+  // The previous code invalidated on net_online alone, i.e. once per loop()
+  // iteration, which is once per few milliseconds: both data screens were
+  // permanently dirty and got a full redraw + 8-page flush every round. That
+  // quietly defeated the whole "nothing dirty -> zero bus traffic" design
+  // documented at the top of this file.
+  const uint32_t polls = health::pollCount();
+  const uint32_t mail_polls = health::mailboxPollCount();
+  if (polls != g_prev_poll_count || mail_polls != g_prev_mailbox_poll_count) {
+    g_prev_poll_count = polls;
+    g_prev_mailbox_poll_count = mail_polls;
     screen::invalidate(screen::SCREEN_SERVER);
     screen::invalidate(screen::SCREEN_MAILBOX);
   }
@@ -693,8 +751,15 @@ void setup() {
     }
   }
   screen::setFocused(g_focus);
-  g_last_local_ms = millis();
-  g_last_netlog_ms = millis();
+  // Seed every cadence from the same clock reading taken AFTER screen::begin()
+  // and printBootReport(), both of which block. Seeding g_last_rescan_ms too:
+  // it used to stay 0, so the first loop() iteration saw a huge elapsed time
+  // and ran a rescan immediately -- a bus burst before the first paint had
+  // even been pushed.
+  const uint32_t now = millis();
+  g_last_local_ms = now;
+  g_last_netlog_ms = now;
+  g_last_rescan_ms = now;
 }
 
 void loop() {
@@ -712,8 +777,10 @@ void loop() {
   handleEdges();
 
   // Periodic re-probe of absent screens, so unplug/replug recovers without
-  // a reset. Cheap: it only touches channels that are currently offline.
-  if (now - g_last_rescan_ms >= kRescanIntervalMs) {
+  // a reset. Cheap: it only touches channels that are currently offline, and
+  // a probe that ACKs costs one I2C transaction (no 6 s self-check any more --
+  // fontDirProbe() is no longer called from begin()).
+  if (elapsedSince(now, g_last_rescan_ms) >= kRescanIntervalMs) {
     g_last_rescan_ms = now;
     screen::rescan();
   }
@@ -721,7 +788,7 @@ void loop() {
   // The ESP32 status screen carries a 1 s-changing number (uptime), so it
   // is redrawn on a fixed cadence. The server/mailbox screens are redrawn
   // whenever a poll lands or focus moves (see handleEdges).
-  if (now - g_last_local_ms >= config::REFRESH_LOCAL_MS) {
+  if (elapsedSince(now, g_last_local_ms) >= config::REFRESH_LOCAL_MS) {
     g_last_local_ms = now;
     screen::invalidate(screen::SCREEN_LOCAL);
   }
@@ -744,7 +811,7 @@ void loop() {
 
   // One network line per minute: enough to see the trend without flooding
   // the log during a long uptime.
-  if (now - g_last_netlog_ms >= kNetLogIntervalMs) {
+  if (elapsedSince(now, g_last_netlog_ms) >= kNetLogIntervalMs) {
     g_last_netlog_ms = now;
     health::printStatus();
   }
