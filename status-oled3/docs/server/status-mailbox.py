@@ -134,7 +134,9 @@ def emit(doc):
     os.makedirs(OUT_DIR, exist_ok=True)
     tmp = os.path.join(OUT_DIR, ".mailbox.json.tmp")
     with open(tmp, "w") as fh:
-        json.dump(doc, fh, indent=1)
+        # Compact, for the same reason as status-snapshot.py: the device's
+        # response buffer is 1 KiB and it rejects a body that fills it.
+        json.dump(doc, fh, separators=(",", ":"))
         fh.write("\n")
     with open(tmp) as fh:  # validate before publishing
         json.load(fh)

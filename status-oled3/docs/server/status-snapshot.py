@@ -403,7 +403,13 @@ def emit(snap):
     os.makedirs(OUT_DIR, exist_ok=True)
     tmp = os.path.join(OUT_DIR, ".snapshot.json.tmp")
     with open(tmp, "w") as fh:
-        json.dump(snap, fh, indent=1)
+        # No indent: the device reads this document into a 1 KiB buffer
+        # (config::HTTP_RESPONSE_MAX) and rejects anything that does not fit
+        # (health.cpp fetchOnce() reports "body truncated at N bytes").
+        # indent=1 roughly doubled the size and was one new field away from
+        # permanently staling the screen; separators=(",", ":") is the compact
+        # form and stays well inside the budget.
+        json.dump(snap, fh, separators=(",", ":"))
         fh.write("\n")
     # Validate before publishing: a syntax error means the temp file is thrown
     # away and last minute's snapshot stays live. A stale but valid document
