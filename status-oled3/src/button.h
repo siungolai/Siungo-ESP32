@@ -20,6 +20,17 @@
  * the 1 s refresh and the 15 s poll. tick() is called every loop() and
  * returns immediately, so the rest of the program keeps its cadence.
  *
+ * Event-per-press contract, which the implementation must uphold even though
+ * it is not visible in the state diagram above:
+ *   - a SHORT press emits exactly one EVENT_SHORT_PRESS, on release;
+ *   - a LONG press emits exactly one EVENT_LONG_PRESS, the moment the
+ *     threshold is crossed, and nothing on release.
+ * A held button therefore reports one event per physical press, never one
+ * per tick(). See long_fired in button.cpp: the bounce path
+ * (down -> debounce_up -> down) re-enters ST_DOWN with press_ms unchanged,
+ * so the threshold is crossed again on the very next tick and a naive
+ * implementation re-emits the long press every iteration.
+ *
  * Only short presses are used at M0 (page flip / focus switch). The long
  * press threshold is kept in config.h so M2 can add long press without
  * restructuring this file.
@@ -54,12 +65,20 @@ void tick();
 // Returns EVENT_NONE when nothing happened.
 // Reading twice returns EVENT_NONE the second time, so a missed loop()
 // iteration can never fire the same event twice.
+//
+// The "one event per press" contract (see the header comment) holds whether
+// or not the event is drained: drain() clears pending but leaves the
+// long-press latch alone, so releasing a long press after a drain still
+// does not produce a short press.
 Event drain(ButtonId id);
 
 // Instantaneous pin level (true = pressed), for serial diagnostics.
+// UNUSED by the firmware; see the note at the bottom of this block.
 bool pressed(ButtonId id);
 
 // Milliseconds the button has currently been held; 0 when not pressed.
+// UNUSED by the firmware: the long-press threshold is handled inside tick()
+// and surfaced as EVENT_LONG_PRESS, so no caller needs to measure it again.
 uint32_t heldMs(ButtonId id);
 
 }  // namespace button

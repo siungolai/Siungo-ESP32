@@ -38,6 +38,12 @@ struct ButtonEntry {
   State state = ST_IDLE;
   uint32_t change_ms = 0;  // millis() when the level last changed
   uint32_t press_ms = 0;   // millis() when the debounce that led here started
+  // One long-press event per physical press. Cleared when the press ends
+  // (ST_IDLE), set the moment the threshold is crossed. Without it the
+  // ST_DOWN -> ST_DEBOUNCE_UP -> ST_DOWN bounce path re-enters ST_DOWN with
+  // press_ms unchanged, so the very next tick() satisfies the long-press
+  // threshold again and a held button emits EVENT_LONG_PRESS every ~20 ms.
+  bool long_fired = false;
   Event pending = EVENT_NONE;
   bool stable_level = false;  // debounced level; false = released (pull-up)
 };
@@ -58,6 +64,7 @@ void begin() {
     b.change_ms = 0;
     b.press_ms = 0;
     b.pending = EVENT_NONE;
+    b.long_fired = false;
     // Seed the debounced level with what the pin actually reads, so a button
     // held while the firmware boots is not seen as a fresh press.
     b.stable_level = (digitalRead(kPin[i]) == kPressedLevel);
@@ -76,6 +83,8 @@ void tick() {
         if (raw_pressed) {
           b.state = ST_DEBOUNCE_DOWN;
           b.change_ms = now;
+          // A new press is a fresh chance at a long press.
+          b.long_fired = false;
         }
         break;
 
@@ -100,7 +109,16 @@ void tick() {
           // Long press fires the moment the threshold is crossed, while the
           // button is still held, so the release afterwards does NOT also
           // produce a short press.
-          b.pending = EVENT_LONG_PRESS;
+          //
+          // long_fired latches the event to THIS press. A bounce back down
+          // (ST_DEBOUNCE_UP -> ST_DOWN) keeps press_ms, so without the latch
+          // the threshold is still crossed on the next tick and the event
+          // fires again -- once per loop() iteration for as long as the
+          // button is held.
+          if (!b.long_fired) {
+            b.long_fired = true;
+            b.pending = EVENT_LONG_PRESS;
+          }
           b.state = ST_DEBOUNCE_UP;
           b.change_ms = now;
         }
@@ -112,9 +130,15 @@ void tick() {
         } else if (now - b.change_ms >= config::BUTTON_DEBOUNCE_MS) {
           // Released and stable. The press only becomes a short press when
           // it never reached the long-press threshold.
-          if (b.pending != EVENT_LONG_PRESS) {
+          //
+          // pending is read through long_fired, not directly: drain() clears
+          // pending between the two ticks of this branch, and a drain() that
+          // raced the release would otherwise lose the "was a long press"
+          // fact and misreport the release as a short press.
+          if (!b.long_fired) {
             b.pending = EVENT_SHORT_PRESS;
           }
+          b.long_fired = false;
           b.stable_level = false;
           b.state = ST_IDLE;
         }
@@ -148,6 +172,8 @@ uint32_t heldMs(ButtonId id) {
   if (b.state == ST_IDLE) {
     return 0;
   }
+  // Unsigned subtraction: correct across the millis() wrap, and the value is
+  // only ever compared against a threshold, never against 0.
   return millis() - b.press_ms;
 }
 
