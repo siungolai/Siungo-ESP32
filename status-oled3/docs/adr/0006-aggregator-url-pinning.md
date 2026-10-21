@@ -70,7 +70,7 @@ M1b: https://www.siungo.top/status/snapshot.json # cron 生成的静态快照（
 
 ### 负面 / 需承担的成本
 
-1. **证书过期会直接让设备连不上**：这台机器的证书是手动续期的，且有过 17 天过期历史。设备侧的表现是「一直停更」，而**停更正是「服务器挂了」的表现**——两者在屏幕上无法区分。缓解办法：把 TLS 握手失败与 HTTP 失败在日志里分开（串口可见），并在 [GLOSSARY.md](../GLOSSARY.md) 的「停更」词条里注明「也可能是证书过期」。真正的修复是把证书续期自动化，但那属于服务器运维范畴，不在本项目内。**当前记录**：notBefore 2026-09-23 20:00:55、notAfter **2026-12-22 20:00:54**（sha1 指纹的完整值不写进仓库——冒号分隔的十六进制串会被 pre-commit 钩子误判成真实 MAC 地址；本地副本见 `W:\Github\Siungo-Website\.doc\证书\`），certbot 从未接管（`certbot certificates` → No certificates found，`/etc/letsencrypt/renewal/` 为空），续期纯人工；2026-11-22 前后监控会开始 WARNING。[ADR-0008](0008-server-side-snapshot-via-cron.md) 的 `snapshot.json` 会带 `cert_expires_in_days`，把这个风险变成屏上可见数字
+1. **证书过期会直接让设备连不上**：这台机器的证书是手动续期的，且有过 17 天过期历史。设备侧的表现是「一直停更」，而**停更正是「服务器挂了」的表现**——两者在屏幕上无法区分。缓解办法：把 TLS 握手失败与 HTTP 失败在日志里分开（串口可见），并在 [GLOSSARY.md](../../GLOSSARY.md) 的「停更」词条里注明「也可能是证书过期」。真正的修复是把证书续期自动化，但那属于服务器运维范畴，不在本项目内。**当前记录**：notBefore 2026-09-23 20:00:55、notAfter **2026-12-22 20:00:54**（sha1 指纹的完整值不写进仓库——冒号分隔的十六进制串会被 pre-commit 钩子误判成真实 MAC 地址；本地副本见 `W:\Github\Siungo-Website\.doc\证书\`），certbot 从未接管（`certbot certificates` → No certificates found，`/etc/letsencrypt/renewal/` 为空），续期纯人工；2026-11-22 前后监控会开始 WARNING。[ADR-0008](0008-server-side-snapshot-via-cron.md) 的 `snapshot.json` 会带 `cert_expires_in_days`，把这个风险变成屏上可见数字
 2. **域名解析依赖**：DNS 挂了设备也连不上。同一阿里云 ECS 上 DNS 通常可用，且失败模式与第 1 条相同，不单独处理
 3. **`www.siungo.top` 若改版到裸域**要改固件（nginx 侧可加跳转，但设备写的是 `www` 前缀）。接受：域名变更频率远低于迭代频率
 4. **路径前缀被 nginx `location` 匹配顺序约束**：前缀必须与主站 `/api/`、`/images/`、`/assets/` 不冲突，且新增 location 会触发 `add_header` 的替换语义问题（`W:\Github\Siungo-Website\README.md:465-499` 记录了 6 条头 × 4 个层级的写法；`/status/` 若需要安全头必须把 6 条全部重写）

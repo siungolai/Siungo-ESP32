@@ -68,7 +68,7 @@
 
 ## 备注
 
-- 本决策与 `pet-oled3` 的 [ADR-0004](../pet-oled3/docs/adr/0004-uptime-only-time-progression.md)（不联网）不冲突：那条决策的适用范围是掌上宠物单机玩法，其备注已声明"仅对 pet-oled3 生效"。本项目需要外网数据，按 [`../HARDWARE.md`](../HARDWARE.md) §9 的实测代价重新评估即可
+- 本决策与 `pet-oled3` 的 [ADR-0004](../../../pet-oled3/docs/adr/0004-uptime-only-time-progression.md)（不联网）不冲突：那条决策的适用范围是掌上宠物单机玩法，其备注已声明"仅对 pet-oled3 生效"。本项目需要外网数据，按 [`../../../HARDWARE.md`](../../../HARDWARE.md) §9 的实测代价重新评估即可
 - 若未来要把聚合端点挪去第二台机器，本决策的方向不变，只换设备轮询的地址（[ADR-0006](0006-aggregator-url-pinning.md) 的一个常量）——这是刻意保留的退路
 - **"设备不持有任何服务端凭据"**的准确边界：不持有**服务端侧**的凭据（IMAP 授权码、阿里云 AccessKey、数据库口令等）。WiFi 自身的 SSID/密码与轮询用的共享密钥（`X-Monitor-Key`，M1b 起）是设备侧凭据，先例见 `clock-oled/src/secrets.h`；共享密钥的分发与存放见 [ADR-0008](0008-server-side-snapshot-via-cron.md) 与 [ADR-0006](0006-aggregator-url-pinning.md)
 - 停更判定用设备本地单调时钟而非服务器 `timestamp`，见 [ADR-0004](0004-fixed-server-polling-and-staleness.md) 的修订

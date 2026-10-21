@@ -94,7 +94,9 @@ static const uint8_t ACTIVE_SCREENS = 3;
 // button B (focus) on GPIO7. GPIO 10/11 were the original plan
 // (docs/adr/0007) but the bench wiring used 6/7 instead; ADR-0007 was
 // reconciled to the bench values. Buzzer moved off GPIO12 to GPIO21
-// because GPIO12 is an MTDI strapping pin.
+// to match the bench wiring. (Earlier comments called GPIO12 an MTDI
+// strapping pin; datasheet v2.2 says strapping pins are GPIO0/3/45/46
+// and MTDI is GPIO41 -- GPIO12 is a plain P2 IO.)
 static const uint8_t PIN_BUTTON_PAGE = 6;    // button A: page on focused screen
 static const uint8_t PIN_BUTTON_FOCUS = 7;   // button B: switch focused screen
 static const uint8_t PIN_BUZZER = 21;        // active buzzer: on/off encoding

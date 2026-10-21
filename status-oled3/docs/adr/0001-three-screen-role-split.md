@@ -10,7 +10,7 @@
 
 本项目三块 128×64 屏承载三类互不相关的信息：**ESP32 自身状态**、**阿里云服务器状态**、**若干邮箱状态**。同时用户要求「两个按钮进行功能的切换」。这两句话有张力——三块屏已经各自对应一类信息，「功能切换」到底切什么，必须先钉死，否则界面层与输入层都无法设计。
 
-本项目沿用 `pet-oled3` 的三屏拓扑（PCA9548A 单总线、三通道、一次只选通一路，见 [`../pet-oled3/docs/adr/0001-use-pca9548a-for-three-displays.md`](../pet-oled3/docs/adr/0001-use-pca9548a-for-three-displays.md) 与 [`0002-single-channel-sequential-refresh.md`](../pet-oled3/docs/adr/0002-single-channel-sequential-refresh.md)），屏的物理分配与刷新调度不受本文影响。
+本项目沿用 `pet-oled3` 的三屏拓扑（PCA9548A 单总线、三通道、一次只选通一路，见 [`../../../pet-oled3/docs/adr/0001-use-pca9548a-for-three-displays.md`](../../../pet-oled3/docs/adr/0001-use-pca9548a-for-three-displays.md) 与 [`0002-single-channel-sequential-refresh.md`](../../../pet-oled3/docs/adr/0002-single-channel-sequential-refresh.md)），屏的物理分配与刷新调度不受本文影响。
 
 ## 考虑的方案
 

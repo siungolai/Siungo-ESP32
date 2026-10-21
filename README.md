@@ -11,9 +11,9 @@
 | [uptime-oled](uptime-oled/) | 128x64 I2C OLED（**SSD1306**）显示通电时间，每 1s 刷新。SCL→GPIO4、SDA→GPIO5，零第三方依赖裸驱；附 `tools/i2c-scan`、`tools/bus-probe` 两个硬件诊断小工程 | ESP32-S3-DevKitC-1 N16R8 |
 | [dht11-oled](dht11-oled/) | **DHT11 温湿度实时监测**，每 1s 刷新屏幕。DATA→**GPIO7**、OLED SCL→GPIO4 / SDA→GPIO5；零第三方依赖自写时序；弃用 Adafruit DHT 库的原因见其 README | ESP32-S3-DevKitC-1 N16R8 |
 | [clock-oled](clock-oled/) | **联网时钟**：NTP 对时后显示时间与日期，每 1s 刷新，大号 HH:MM + 日期星期。每小时自动重新对时压漂移。OLED SCL→GPIO4 / SDA→GPIO5；**需先建 `src/secrets.h` 填 WiFi** | ESP32-S3-DevKitC-1 N16R8 |
-| [pet-oled3](pet-oled3/) | **养成类掌上宠物**（策划阶段，尚未动工）：三块 SSD1306 分饰角色/数值/日志，经 **PCA9548A** 解决同址冲突，4x4 键盘出三个主动作，旋转编码器调参，蜂鸣器出音效 | ESP32-S3-DevKitC-1 N16R8 |
+| [pet-oled3](pet-oled3/) | **养成类掌上宠物**（**M0 bringup 已完成，2026-10-21 上板实测通过**）：三块 SSD1306 分饰角色/数值/日志，经 **PCA9548A** 解决同址冲突；**两个轻触按钮**做「选动作 → 确认」，有源蜂鸣器出提示音。硬件接口与 `status-oled3` 完全同一套 | ESP32-S3-DevKitC-1 N16R8 |
 | [status-oled](status-oled/) | **ESP32 自身状态监视器**：单屏四页（总览/身份/堆/总线），轻触按钮循环翻页，每 1s 刷新数值。**不联网、零第三方依赖、无 secrets.h**；OLED SCL→GPIO4 / SDA→GPIO5，按钮→GPIO7（与 dht11-oled 的 DATA 脚冲突，同一时间只插一个）。**已编译通过，未上板** | ESP32-S3-DevKitC-1 N16R8 |
-| [status-oled3](status-oled3/) | **桌面状态显示器**（M0 固件已编译，**尚未上板**）：三块 SSD1306 分饰 ESP32 状态/阿里云服务器状态/邮箱未读数，经 **PCA9548A** 解决同址冲突；两个轻触按钮切换功能，有源蜂鸣器做通知提醒 | ESP32-S3-DevKitC-1 N16R8 |
+| [status-oled3](status-oled3/) | **桌面状态显示器**（**M0 / M1a / M1b 已上板实测通过**，2026-10-17）：三块 SSD1306 分饰 ESP32 状态/阿里云服务器状态/邮箱未读数，经 **PCA9548A** 解决同址冲突；两个轻触按钮切换功能，有源蜂鸣器做通知提醒。M1b 服务器侧已部署到阿里云，设备侧持续取数中 | ESP32-S3-DevKitC-1 N16R8 |
 
 硬件与工具链参数（含实测数据）见 **[HARDWARE.md](HARDWARE.md)** —— 器件规格、接线、驱动接口与踩坑记录。
 
@@ -21,7 +21,9 @@
 
 `clock-oled` 用 Arduino core 自带的 `WiFi`（无外部库），OLED 驱动与 `uptime-oled` 同一份裸驱。
 
-`status-oled` 与 `status-oled3` 是两个不同的项目：前者**单屏、纯本地、零依赖、已可编译**；后者三屏 + PCA9548A + 服务器轮询，M0 固件已编译但**尚未上板**。
+`status-oled` 与 `status-oled3` 是两个不同的项目：前者**单屏、纯本地、零依赖、已可编译**；后者三屏 + PCA9548A + 服务器轮询，**M0 / M1a / M1b 均已上板实测通过**（2026-10-17），服务器侧产物已部署到阿里云，设备侧持续取数中。
+
+`pet-oled3` 与 `status-oled3` 共享同一套硬件接口与驱动层（三屏 + PCA9548A + 两键 + 有源蜂鸣器），但玩法不同：前者是养成游戏内核，后者是状态聚合。
 
 ## 已废止的项目
 
@@ -79,8 +81,8 @@
 - **要看这块板子现在怎么样（不联网）** → `status-oled`（单屏四页 + 按钮翻页，RAM 6.2% / Flash 8.6%，已可编译）
 - **要显示时间与日期** → `clock-oled`（先建 `src/secrets.h` 填 WiFi，否则编译不过）
 - **要测温湿度** → `dht11-oled`（DATA 接 GPIO7；屏幕会直接显示是"没接传感器"还是"线接错了"）
-- **要做三块屏的项目 / 要玩 I2C 多路复用** → `pet-oled3`（**只有文档，尚无代码**；先读它的 `docs/策划案.md`，动手第一步是 M0 bringup）
-- **要看服务器 / 邮箱 / 设备自身状态** → `status-oled3`（**只有文档，尚无代码**；三屏 + 按钮 + 蜂鸣器 + 聚合端点，先读它的 [`docs/adr/`](status-oled3/docs/adr/)，动手第一步是 M0 bringup）
+- **要做三块屏的项目 / 要玩 I2C 多路复用** → `pet-oled3`（**M0 已上板实测通过**，有 `src/` 固件；先读它的 `docs/策划案.md`——**硬件接口已与 `status-oled3` 对齐**，接线直接照抄）
+- **要看服务器 / 邮箱 / 设备自身状态** → `status-oled3`（**M0 / M1a / M1b 已上板实测通过**，有 `src/` 固件；三屏 + 按钮 + 蜂鸣器 + 聚合端点，先读它的 [`status-oled3/docs/adr/`](status-oled3/docs/adr/)，剩余工作是证书固定与逐账号邮箱状态数组）
 
 ## 许可
 

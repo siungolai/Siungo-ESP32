@@ -45,17 +45,29 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 |---|---|---|
 | GPIO 1 / GPIO 2 | **I2C 禁接** | 实测全段超时，见 [§6.1](#61-gpio-1--gpio-2-上-i2c-完全不通实测) |
 | GPIO 19 / GPIO 20 | **禁占** | 原生 USB D+/D-（USB-Serial-JTAG），占用即失去板载串口下载，见 [§1.1](#11-板级参数) |
-| GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled)。**`status-oled3` 实测接在 4/5 上**（PCA9548A 上游，见 §4.5） |
-| GPIO 6 / GPIO 7 | **按项目分角色，同一时间只插一个**：GPIO 6 = `status-oled3` 按钮 A（翻页，2026-10-16 实测）/ GPIO 7 = `dht11-oled` 的 DHT11 数据脚 / `status-oled3` 的按钮 B（换聚焦屏） | GPIO 7 上两者不能同时插——DHT11 模块自带 4.7k~10k 上拉，会与按钮要用的内部上拉并联，见 [§5.3](#53-接线dht11) |
-| GPIO 21 | `status-oled3` 有源蜂鸣器（2026-10-16 实测） | 初版规划 GPIO 12，因 MTDI strapping 避开而改 |
+| GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled)。**`status-oled3` 与 `pet-oled3` 实测接在 4/5 上**（PCA9548A 上游，见 §4.5） |
+| GPIO 6 / GPIO 7 | **同是 `status-oled3` 与 `pet-oled3` 的按钮脚**（2026-10-16 / 2026-10-21 实测）：GPIO 6 = 按钮 A、GPIO 7 = 按钮 B。**另：GPIO 7 与 `dht11-oled` 的 DHT11 数据脚二选一** | GPIO 7 上两者不能同时插——DHT11 模块自带 4.7k~10k 上拉，会与按钮要用的内部上拉并联，见 [§5.3](#53-接线dht11) |
+| GPIO 21 | `status-oled3` 有源蜂鸣器（2026-10-16 实测）；**`pet-oled3`（2026-10-21 起）同接 21 做有源蜂鸣器** | 初版规划 GPIO 12，2026-10-16 按 bench 实测接线订正（**改动理由是与实物一致，不是 GPIO 12 有禁忌**——见下一行）。⚠️ **驱动强度必须提到 `GPIO_DRIVE_CAP_3`**：默认档只有 20 mA，有源蜂鸣器典型 20–30 mA，属临界（见下方驱动能力注记 + [`pet-oled3/docs/adr/0010`](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)） |
+| GPIO 8 | `status-oled3` 与 `pet-oled3`（2026-10-21 起）共用：PCA9548A **RESET**（active-low） | 保留硬复位能力；bench 实测 `as found=HIGH`，驱动低再释放不改变结果 |
+| GPIO 12 | **普通 IO**（datasheet v2.2 §2.3.4 列为 P2 = 可自由使用无限制），本机当前无归属 | ⚠️ 2026-10-21 订正：旧版本把它误记为「MTDI strapping 脚」。**datasheet v2.2 实测口径：strapping 脚只有 GPIO 0 / 3 / 45 / 46**（§3 Boot Configurations：GPIO0+GPIO46 = chip boot mode、GPIO45 = VDD_SPI 电压、GPIO46 = ROM 打印、GPIO3 = JTAG 信号源）；**MTDI = GPIO 41**（JTAG 组 GPIO 39/40/41/42 = MTCK/MTDO/MTDI/MTMS）。GPIO 12 复用功能为 FSPIIO6 / SUBSPICLK，非 strapping |
 | GPIO 26–32 | SPI0/1，封装内 Flash/PSRAM 已占 | 规格已核实，不推荐他用 |
 | GPIO 33–37 | 8 线 SPI 高位数据线 | 本板 OPI PSRAM 已占用 |
-| GPIO 38 | 规划中：编码器按键 | 待 bringup 验证 |
+| GPIO 38 | **空闲**（2026-10-21）：原规划给 `pet-oled3` 的编码器按键，编码器取消后无归属 | 仍是可自由分配的普通 IO，留作 `pet-oled3` 加第三键的备位 |
 | GPIO 43 / GPIO 44 | UART0（Universal Asynchronous Receiver-Transmitter，通用异步收发器） | 规格已核实 |
-| GPIO 39–42 | JTAG（Joint Test Action Group） | 规格已核实 |
+| GPIO 39–42 | JTAG（Joint Test Action Group）：MTCK=39 / MTDO=40 / **MTDI=41** / MTMS=42 | 规格已核实 |
+| GPIO 0 / 3 / 45 / 46 | **strapping 脚，勿当普通 IO 用** | datasheet v2.2 §2.3.4 列为 P3；§3 Boot Configurations：GPIO0+GPIO46 = chip boot mode、GPIO45 = VDD_SPI 电压档位、GPIO46 = ROM 消息打印、GPIO3 = JTAG 信号源 |
 | GPIO 48 | 板载 WS2812 数据脚 | 规格已核实 + 本机实测 |
 
 > ESP32-S3 的 GPIO 分三档驱动能力：默认驱动强度 GPIO17/18 = 10mA、GPIO19/20 = 40mA、其余 20mA；累计 IO 输出电流上限 1500mA。数据手册未给出每脚绝对最大电流——常见引用的 40mA 是 `PAD_DRIVER=3` 档的典型源电流，不是绝对最大值。
+>
+> ⚠️ **2026-10-21 补充：驱动强度不是 `pinMode()` 设的。** Arduino 核心的 `pinMode()` 只调 `gpio_config()`，**不碰 `FUN_DRV` 寄存器**——驱动强度保持芯片默认档（`GPIO_DRIVE_CAP_DEFAULT = 2` = medium）。要提到 40 mA 源电流必须**显式调用**：
+>
+> ```cpp
+> #include <driver/gpio.h>
+> gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3);  // 档位：0=weak 1=stronger 2=medium 3=strongest
+> ```
+>
+> `driver/gpio.h` 在 Arduino 工程里可直接 `#include`（`Arduino.h → esp32-hal.h → esp32-hal-dac.h` 已把它带进 include 链），**已用最小 Arduino 工程编译验证可用**。适用于**所有源端驱动大电流的场合**——目前本机只有 GPIO 21 蜂鸣器一处。详见 [`pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md`](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)。
 
 ### 1.3 关键板级配置（`platformio.ini`）
 
@@ -433,12 +445,12 @@ HD44780 走 **4 位模式**：一个字节拆成高/低两个 nibble 分两次�
 
 ---
 
-## 4. I2C 多路复用器：PCA9548A（8 通道）—— 规格已核实，待 bringup 验证
+## 4. I2C 多路复用器：PCA9548A（8 通道）—— 规格已核实，本机已验证
 
-> **状态：已购成品模块，尚未接线验证。** 本节的"已核实"是**规格事实**（来自 TI 官方数据手册），
-> 不是"本机实测可用"。上游/下游上拉归属见 [§4.3](#43-上拉电阻归属)，
+> **状态：规格已核实（TI 数据手册）+ 本机已验证（2026-10-17 `status-oled3` bench）。** 本节的"已核实"是**规格事实**（来自 TI 官方数据手册），[§4.5](#45-接线pca9548a-上游) 与 [§4.8](#48-已验证2026-10-17) 记录的是**本机实测**结论。
+> 上游/下游上拉归属见 [§4.3](#43-上拉电阻归属)，
 > 上电后第一件事是显式选通，见 [§4.2](#42-控制寄存器的三个实现细节) 的提示框。
-> bringup 验证清单见 [§4.8](#48-待本机验证bringup-必做)。
+> bringup 验证清单见 [§4.8](#48-已验证2026-10-17)。
 
 ### 4.1 规格参数
 
@@ -510,7 +522,7 @@ PCA9548A **支持**多通道同时选通，但本方案**主动不用**（见 [A
 | VCC | 3V3 | 模块支持 1.65–5.5 V |
 | GND | GND | |
 | A0 / A1 / A2 | GND（跳线） | 目标地址 **0x70**，**2026-10-17 已由 v7 探针单点 ACK 证实**。地址表：LLL=0x70 / LLH=0x71 / LHL=0x72 / LHH=0x73 / HLL=0x74 / HLH=0x75 / HHL=0x76 / HHH=0x77 |
-| RESET | 3V3 或悬空 | active-low；多数模块已内部上拉。`status-oled3` bench 接 GPIO8 实测：`as found=HIGH`，驱动低再释放不改变结果 |
+| RESET | **GPIO 8**（`status-oled3` / `pet-oled3` 实际接线；不用时也可接 3V3 或悬空） | active-low；多数模块已内部上拉。`status-oled3` bench 接 GPIO8 实测：`as found=HIGH`，驱动低再释放不改变结果。保留接线是为了「下游总线卡死时硬复位」 |
 
 > **✅ 2026-10-17 结案：`0x70` 无应答的根因是 SDA/SCL 交叉。** 实物接线是 **GPIO4 → 模块 SCL、GPIO5 → 模块 SDA**（用户回报原文「g4连scl;g5连sda」），而固件最初写 `I2C_SDA_PIN=4 / I2C_SCL_PIN=5`，两线在实物与固件之间交叉。I2C 的 START/STOP/ACK 全定义在「SDA 相对 SCL 的边沿」上，互换后从机永远识别不出 START。
 >
@@ -538,36 +550,55 @@ A0 = pin22、A1 = pin23、A2 = pin18，各自直连 VCC 或 GND；RESET = pin24�
 > 三块屏**全部保持 0x3C 出厂地址** —— 因为每条通道上只有一个 0x3C 器件，
 > 地址冲突在**通道层面**被隔离。这正是 PCA9548A 存在的意义，**不需要动烙铁改地址**。
 
-### 4.7 规划中的驱动接口（尚未实现）
+### 4.7 驱动接口（已实现，2026-10-17）
 
-以下接口来自 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md) §5.2 的设计稿，**代码尚未实现**，仅记录设计约定：
+以下接口**已在 `status-oled3` 实现并实测通过**（`status-oled3/src/pca9548a.h` / `.cpp`）。`pet-oled3` 直接复用，**不再另抄一份签名**：
 
 | 接口 | 约定 |
 |---|---|
-| `bool pca9548a_select(uint8_t channel)` | `channel` 取 0–7；只选通这一路，其余全部断开 |
-| `bool pca9548a_deselect_all()` | 全部断开 |
-| `bool Display::begin(uint8_t channel)` / `void Display::flush()` | 每块屏绑定一个通道，`flush()` 前自动选通、用完断开 |
+| `bool pca9548a::begin()` | 初始化 I2C、设超时、探测复用器（0x70 无 ACK 则返回 false） |
+| `bool pca9548a::ready()` | 复用器是否在线；离线时上游访问被短路，不产生 I2C 流量 |
+| `bool pca9548a::isDirect()` | 是否单屏直连拓扑（无复用器，`config::ACTIVE_SCREENS <= 1`） |
+| `bool pca9548a::select(uint8_t channel)` | `channel` 取 0–7，**只选通这一路**，其余全部断开；越界返回 false；重选当前通道是 no-op |
+| `void pca9548a::deselectAll()` | 全部断开（**无返回值**：断开是"尽力而为"的动作） |
+| `uint8_t pca9548a::currentChannel()` | 诊断用：当前选通的通道，8 表示无 |
+| `uint8_t pca9548a::lastError()` | 诊断用：上次上游 I2C 事务的结果码（0 = ok，5 = 超时） |
 
 驱动内部维护通道缓存：`select(n)` 若 `n` 等于当前通道，直接返回、不产生 I2C 事务。设计上**刻意不暴露** `pca9548a_write_mask(uint8_t mask)`，避免调用方同时选通多路触发上拉并联。
 
 选通的寄存器写入必须覆盖 [§4.2](#42-控制寄存器的三个实现细节) 第 2 条：一次完整的 `beginTransmission(0x70) → write(1 << channel) → endTransmission()`，等 STOP 之后通道才真正生效。
 
-### 4.8 待本机验证（bringup 必做）
+> 📌 **2026-10-21 订正**：本节原标题为「规划中的驱动接口（尚未实现）」，接口名为 `pca9548a_select()` / `pca9548a_deselect_all()` 自由函数。实际实现把它们放进 `pca9548a` 命名空间，且 `deselectAll()` 返回 `void`。`pet-oled3` 的 [ADR-0002](pet-oled3/docs/adr/0002-single-channel-sequential-refresh.md) 与 [ADR-0006](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md) 已按实现签名订正。
+
+### 4.8 已验证（2026-10-17）
 
 - [x] 扫描 0x70–0x77，确认 PCA9548A **实际地址** —— 已完成（2026-10-17 v7 探针）：`SDA=GPIO5 SCL=GPIO4` 时 **`0x70 -> ACK`**，地址确认为 0x70（A0/A1/A2 全接地）。此前全段 0 ACK 是因为线序交叉，不是地址错
 - [x] **空总线对照（2026-10-17 v6）** —— GPIO10/GPIO11 本项目无接线，作空总线对照：`idle` 读 LOW/LOW、全段 `nack_addr=112 timeout=0`、完整跑完 112 个事务。⟹ ESP32 I2C 外设与固件配置正常，模块总线的故障不能归因于板子或内核
-- [~] 万用表量各通道 SDA/SCL 对 VCC 阻值，确认模块上拉**挂在上游还是八路全挂** —— 未用万用表做（用户无万用表）；已用 ADC 侧面证明上拉接着带电的轨（SDA/SCL 均 3152mV，RESET 拉低时不变）。上游/八路的区分对驱动无影响：`pca9548a::select()` 一次只选一路（ADR-0001），不依赖上拉归属
+- [~] 万用表量各通道 SDA/SCL 对 VCC 阻值，确认模块上拉**挂在上游还是八路全挂** —— 未用万用表做（用户无万用表）；已用 ADC 侧面证明上拉接着带电的轨（SDA/SCL 均 3152mV，RESET 拉低时不变）。上游/八路的区分对驱动无影响：`pca9548a::select()` 一次只选一路（ADR-0001），不依赖上拉归属。**2026-10-21 补充**：`pet-oled3` 用脚本把这件事量化结案了——等效上拉下拉电阻 1567–3333 Ω，恒高于 955 Ω 判据（低电平 V_low ≤ 0.4 V），且结论与上拉归属无关；推导见 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md) §2.3.1。**本项从此不必再买万用表。**
 - [x] 逐通道探测 0x3C，确认三块屏都能被找到 —— 已完成（2026-10-17）：ch0/ch1/ch2 **三块屏全部 online**，boot report 逐行确认
 - [x] **三块屏显示不同内容**（同内容无法区分是否真的切换成功）—— 已完成（2026-10-17）：三屏各显各的内容，且**字无上下镜像**（`0xC8` COM 扫描反向正确，`fontDirProbe()` 自检通过）
 - [x] 记录 `endTransmission()` 是否返回 5（超时）—— 已完成：**不返回 5**，全段 `timeout=0`。（v4 曾报假的 error 5，根因是探针缺 `Wire.end()`，见 §4.5 教训）
 - [x] 确认上游 SDA / SCL 脚位在本机可用 —— **口径订正（2026-10-17）**：实测 **SDA=GPIO5 / SCL=GPIO4**（与初版策划案的 GPIO8/9 及固件最初的 4/5 都不同）。GPIO4/5 可用性由 §2.3 既有实测确认；GPIO8 改接 PCA9548A RST
 - [x] 验证「选通在一次完整事务的 STOP 之后才生效」（见 [§4.2](#42-控制寄存器的三个实现细节)）—— 已完成（2026-10-17，反证法）：三块屏同时在线且各显各的内容。若选通/断开时序错，三块 0x3C 会互相抢占同一通道而表现为「内容错乱 / 只有一块亮」，实测无此现象
 
-> ✅ **§4.8 七项全部完成（2026-10-17）。** 本节标题可从「待本机验证」改为「已验证」。
+> ✅ **§4.8 七项全部完成（2026-10-17）。**
 > 根因与教训见 §4.5 的结案块；实现签名见 `status-oled3/src/pca9548a.h`。
 
-> 完成后回写本节：把「规格已核实」改为「实测可用」，并把 [§4.7](#47-规划中的驱动接口尚未实现) 的规划接口替换为实现签名。
-> 项目背景与完整接线表见 [`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md) 的 M0 里程碑。
+> 📌 **2026-10-21 复现确认（`pet-oled3` M0）**：`pet-oled3` 用**自己那批模块**把这七项又跑了一遍，结论与 `status-oled3` **完全一致**：
+> - PCA9548A **0x70 应答**（A0/A1/A2 接地）；
+> - **ch0 / ch1 / ch2 三个下游通道的 `endTransmission()` 全程返回 0（ACK），无一次返回 5**；
+> - 三块屏各显各的内容（用户目视确认），**三块屏同型号同尺寸**（`pet-oled3` M0 目视结案）；
+> - **4 种按钮手势**（短按 / 长按 × 按钮 A / B）全部触发，一次按压一次事件；
+> - **蜂鸣器驱动档现场读回 = 3**（`gpio_get_drive_capability()`），与 §1.2 的驱动能力注记一致。
+>
+> M0 固件：`pet-oled3/src/main.cpp`；串口原始记录：`pet-oled3/.doc/m0-serial-20261021.txt`。
+>
+> 📌 复现时用到的**新铁律**（源自 `status-oled3` 的 36 小时教训，现已写进 `pet-oled3/src/pca9548a.cpp` 注释）：**换脚位或重新初始化 I2C 必须先 `Wire.end()` 再 `Wire.begin()`**——ESP32 Arduino 框架的 `Wire.cpp` 让第二次 `begin()` 变成 no-op（永远不 `initPins()`），不这样做会得到"改了脚位却还是旧脚在说话"的假测量。
+>
+> 📌 **本节七项已由两个项目各自实测，仓库内不再有「PCA9548A 通路待验证」的事项。** `pet-oled3` 的 [ADR-0006](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md) 已按实现签名订正。
+
+> 📌 **2026-10-21 订正**：本节标题已从「待本机验证（bringup 必做）」改为「已验证（2026-10-17）」；原第 575 行的待办（"完成后回写本节"）**已执行**——[§4.7](#47-驱动接口已实现2026-10-17) 的规划接口已替换为实现签名。
+> `pet-oled3` 的 M0 **已于 2026-10-21 完成复现**（结论一致，见上方复现确认块），不必重查地址、线序、上拉、模块好坏。见 [`pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md`](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md)。
 
 ---
 
@@ -909,7 +940,9 @@ DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#5
 - 1602 项目（含 5V 电平转换专章）：[`lcd1602-uptime/README.md`](lcd1602-uptime/README.md)
 - 板载 WS2812 引脚判定：[`pin-probe/README.md`](pin-probe/README.md)
 - 养成游戏策划案（三屏 + PCA9548A 方案）：[`pet-oled3/docs/策划案.md`](pet-oled3/docs/策划案.md)
-- 桌面状态显示器（三屏 + 按钮 + 蜂鸣器，策划中）：[`status-oled3/README.md`](status-oled3/README.md)
+- 养成游戏的硬件接口决策（**与 `status-oled3` 同一套接线**）：[`pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md`](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md) / [两键输入决策](pet-oled3/docs/adr/0007-two-buttons-only-input.md)
+- 养成游戏的数值参数与交互面定稿：[数值平衡](pet-oled3/docs/adr/0008-numeric-balance-first-pass-parameters.md) / [两键交互面](pet-oled3/docs/adr/0009-two-button-interaction-coverage.md) / [蜂鸣器驱动强度](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)
+- 桌面状态显示器（三屏 + 按钮 + 蜂鸣器，**M0 / M1a / M1b 已上板实测通过**）：[`status-oled3/README.md`](status-oled3/README.md)
 - 状态显示器的决策记录（三屏分工、聚合端点、引脚分配等）：[`status-oled3/docs/adr/`](status-oled3/docs/adr/)
 - 关键决策记录（PCA9548A 选型、单通道轮询、开机时间推进等）：[`pet-oled3/docs/adr/`](pet-oled3/docs/adr/)
 - 术语表（统一命名）：[`pet-oled3/CONTEXT.md`](pet-oled3/CONTEXT.md)

@@ -2,19 +2,20 @@
 
 ESP32-S3 + PCA9548A + 三块 SSD1306 的桌面状态显示器。三块屏分别显示 **ESP32 自身状态**、**阿里云服务器状态**、**邮箱未读状态**；两个轻触按钮切换功能，一个有源蜂鸣器做通知提醒。
 
-## 屏幕拓扑：单屏直连（当前）/ 三屏多路复用（一个常量切换）
+## 屏幕拓扑：三屏多路复用（当前）/ 单屏直连（2026-10-17 的一次绕行，一个常量切换）
 
-2026-10-17 起开发跑在**单屏直连**拓扑：一块 SSD1306 直连 GPIO4/GPIO5，**多路复用器不在信号路径里**。三个逻辑屏（ESP32 状态 / 服务器 / 邮箱）共用这一块面板，按钮 B 选哪个逻辑屏显示、按钮 A 在聚焦屏内翻页；数据链路、分页、按钮、蜂鸣器与三屏版完全一致。
+**当前是三屏多路复用**：`src/config.h` 的 `ACTIVE_SCREENS = 3`（自 commit `53218a2`「结案三屏 bringup」起就是 3），boot report 打印 `pca9548a 0x70 : online` + ch0/ch1/ch2 三屏全 online（见下文 M0 结案）。
 
-触发原因：PCA9548A 模块在 `0x70` 无应答，增强版探针 [`tools/i2c-probe`](tools/i2c-probe/) 已排除 ESP32 侧与物理层（v6 空总线对照证明外设与固件配置正常；全段 NACK 无超时；地址全段覆盖；上拉在线且轨带电），卡点收敛到模块本身或其四根线；同时确认同一块屏直连 GPIO4/5 在本仓库其他程序可行。判据与实测记录见 [`.doc/single-screen-topology-2026-10-17.md`](.doc/single-screen-topology-2026-10-17.md) 与 [`.doc/i2c-absent-investigation-2026-10-17.md`](.doc/i2c-absent-investigation-2026-10-17.md)（过程产物，已 gitignore）。
+**单屏直连是 2026-10-17 中间的一次绕行**：那天 PCA9548A 模块在 `0x70` 无应答，增强版探针 [`tools/i2c-probe`](tools/i2c-probe/) 已排除 ESP32 侧与物理层（v6 空总线对照证明外设与固件配置正常；全段 NACK 无超时；地址全段覆盖；上拉在线且轨带电），卡点一度收敛到模块本身或其四根线；当时在工作树里改跑单屏直连（`ACTIVE_SCREENS = 1`）让 M1a 的数据链路先跑起来。**根因后来查清是 SDA/SCL 交叉**（见下节），三屏已恢复——`ACTIVE_SCREENS = 1` 那次绕行**从未进过 git**（`git log -p -- src/config.h` 里该常量自 `53218a2` 起一直是 3），所以只有本文档与 `.doc/` 里的过程记录留下了这段痕迹。判据与当时的过程记录见 [`.doc/single-screen-topology-2026-10-17.md`](.doc/single-screen-topology-2026-10-17.md) 与 [`.doc/i2c-absent-investigation-2026-10-17.md`](.doc/i2c-absent-investigation-2026-10-17.md)（过程产物，已 gitignore）。
 
-**回三屏只改一个常量**：`src/config.h` 的 `ACTIVE_SCREENS` 由 1 改 3，多路复用器回到链路里，三个逻辑屏各占一个通道与一块面板。没有其他开关，因此不存在「某两个设置组合起来是错的」这种状态。切换的语义细节（尤其 `pca9548a::begin()` 与 `select()` 返回值方向相反是刻意的）记录在同目录 `.doc` 文档里。
+**拓扑仍由一个常量决定**：`src/config.h` 的 `ACTIVE_SCREENS` 为 3 时多路复用器在链路里、为 1 时三个逻辑屏共用一块直连面板。没有其他开关，因此不存在「某两个设置组合起来是错的」这种状态。切换的语义细节（尤其 `pca9548a::begin()` 与 `select()` 返回值方向相反是刻意的）记录在同目录 `.doc` 文档里。
 
 ## 硬件拓扑（三屏版，`ACTIVE_SCREENS = 3` 时）
 
-沿用 `pet-oled3` 的三屏链路：PCA9548A（0x70，A0/A1/A2 接地）挂在上游 I2C（SDA=GPIO4 / SCL=GPIO5）上，通道 0/1/2 各接一块 SSD1306（0x3C），一次只选通一路。
+沿用 `pet-oled3` 的三屏链路：PCA9548A（0x70，A0/A1/A2 接地）挂在上游 I2C（**SDA=GPIO5 / SCL=GPIO4**）上，通道 0/1/2 各接一块 SSD1306（0x3C），一次只选通一路。
 
-> GPIO 口径说明：2026-10-16 bench 实测接线为 GPIO4/GPIO5（非 `pet-oled3` 策划案的 GPIO8/9）。GPIO4/5 正是 [`HARDWARE.md`](../HARDWARE.md) §2.3 记录的本机实测跑通 I2C 脚位。
+> GPIO 口径说明：2026-10-16 bench 实测接线为 GPIO4/GPIO5（非 `pet-oled3` 初版策划案的 GPIO8/9）。GPIO4/5 正是 [`HARDWARE.md`](../HARDWARE.md) §2.3 记录的本机实测跑通 I2C 脚位。
+> 📌 **2026-10-21**：`pet-oled3` 已按用户决策**与本项目硬件完全对齐**（SDA=GPIO5 / SCL=GPIO4、RST=GPIO8、按钮=6/7、有源蜂鸣器=21、WS2812=48），见 [`../pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md`](../pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md)。本表两个项目现在指同一套接线。
 
 | 器件 | 连接 | 说明 |
 |---|---|---|
@@ -22,7 +23,7 @@ ESP32-S3 + PCA9548A + 三块 SSD1306 的桌面状态显示器。三块屏分别�
 | 按钮 B（切换聚焦屏） | GPIO 7，内部上拉 | 短按 = 聚焦屏 0→1→2→0 循环 |
 | 有源蜂鸣器 | GPIO 21，推挽通断 | 有源型，只能通断编码 |
 
-引脚依据见 [`docs/adr/0007-gpio-assignment-buttons-and-buzzer.md`](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)。初版规划曾是 GPIO10/11/12，2026-10-16 按 bench 实际接线订正——GPIO 12 是 MTMI strapping 脚，避开它是订正的主要收益。
+引脚依据见 [`docs/adr/0007-gpio-assignment-buttons-and-buzzer.md`](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)。初版规划曾是 GPIO10/11/12，2026-10-16 按 bench 实际接线订正——**理由是保持与实物一致**，不是 GPIO 12 有禁忌（datasheet v2.2 核实：strapping 脚只有 GPIO 0/3/45/46，MTDI 是 GPIO 41，GPIO 12 是 P2 普通 IO）。
 
 ## 数据来源
 
@@ -40,7 +41,7 @@ ESP32-S3 + PCA9548A + 三块 SSD1306 的桌面状态显示器。三块屏分别�
 |---|---|---|
 | M0 | 硬件 bringup：PCA9548A + 三屏链路实测，按钮消抖，蜂鸣器通断 | **已上板实测通过**（2026-10-17，`pca9548a 0x70 : online` + ch0/ch1/ch2 三屏全 online，字模方向正确无镜像，见下文） |
 | M1a | 设备侧数据链路：WiFi + HTTPS `GET /api/health` + 停更判定 + 断网/停更提示音 | **已上板实测通过**（2026-10-17，串口 `[poll] ok` + `stale=no`，见下文） |
-| M1b | 服务器侧 cron 快照 + 邮箱 cron，设备切到 `/status/snapshot.json` | **服务器侧产物已写好并本地验证**（4 个文件，见下文），未部署；**设备侧已实现并编译通过**（双文档轮询、19+5 字段门面、服务器屏两页、未读上升沿），端点未切、未上板验收 |
+| M1b | 服务器侧 cron 快照 + 邮箱 cron，设备切到 `/status/snapshot.json` | **已上线并实测验收（2026-10-17）**：服务器侧 4 个产物已部署到阿里云（无密钥/错密钥 403，正确密钥 200，白名单外 403，cron 每分钟刷新）；设备侧固件已烧录并持续取数（`[poll] snapshot ok` / `[poll] mailbox ok`），见下文「当前状态」的验收表 |
 | M2 | 完整界面：服务器屏两页、邮箱屏未读数、聚焦屏翻页 | 服务器屏两页 + 邮箱未读数已随 M1b 设备侧落地，剩余 M2 = 证书固定（`setCACert` 取代 `setInsecure`）与逐账号邮箱状态数组 |
 
 M0 先行的理由：三屏 + PCA9548A 链路在本机**从未实测**，按钮与蜂鸣器在 [`HARDWARE.md`](../HARDWARE.md) 中零记录。先验证硬件再写上层，避免「代码写完了发现屏不亮」。
@@ -63,7 +64,7 @@ I2C 的 START/STOP/ACK 全定义在「SDA 相对 SCL 的边沿」上，互换后
 |---|---|---|
 | A1 空总线 GPIO10/11（对照） | — | `nack_addr=112 timeout=0` |
 | A2 **匹配实物** | **GPIO5 / GPIO4** | **`0x70 -> ACK`** |
-| A3 固件原状 | GPIO4 / GPIO5 | `0x70 -> 2 nack_addr` |
+| A3 交叉线序 | GPIO4 / GPIO5 | `0x70 -> 2 nack_addr` |
 
 修复 = `config.h` 两行：`I2C_SDA_PIN = 5` / `I2C_SCL_PIN = 4`。改完 boot report 三屏全 online。
 
@@ -133,7 +134,7 @@ pio device monitor -b 115200   # 或 VS Code 的 PlatformIO 串口监视器
 
 M1b 设备侧资源占用（编译实测，ESP32-S3）：RAM 16.3%（53536/327680）/ Flash 26.9%（898873/3342336）。对比 M1a 的 15.5% / 26.6%，差额约 +2.8 KB RAM / +11 KB Flash，来自两份文档的双轮询器、19+5 字段的 `hasKey()` 门面、服务器屏两页与邮箱屏的渲染路径。
 
-烧录后按 [`HARDWARE.md`](../HARDWARE.md) §4.8 的 checklist 逐项验，串口会打印 M0 boot report。**当前实机输出（2026-10-16，卡点状态）**：
+烧录后按 [`HARDWARE.md`](../HARDWARE.md) §4.8 的 checklist 逐项验，串口会打印 M0 boot report。**卡点状态的实机输出（2026-10-16，SDA/SCL 交叉未修时）——历史留档，已不是当前状态**：
 
 ```
 === status-oled3 M0 boot report ===
@@ -145,7 +146,7 @@ focused screen     : ESP32
 ==================================
 ```
 
-`pca9548a 0x70 : online` + 三屏全 `online` = 链路打通。若有 `absent`，按报告定位是哪一段；按钮按下串口应打印 `page:` 或 `focus:`，蜂鸣器在空操作时极短响一次。
+修好线序后的输出见上文「M0 实测结论（2026-10-17）」。`pca9548a 0x70 : online` + 三屏全 `online` = 链路打通。若有 `absent`，按报告定位是哪一段；按钮按下串口应打印 `page:` 或 `focus:`，蜂鸣器在空操作时极短响一次。
 
 - [`GLOSSARY.md`](GLOSSARY.md) — 本项目术语表
 - [`docs/adr/`](docs/adr/) — 决策记录（ADR-0001 ~ ADR-0012，其中 [ADR-0005](docs/adr/0005-aggregator-as-standalone-service-with-shared-secret.md) 已被否决并由 ADR-0008 取代）
@@ -154,7 +155,7 @@ focused screen     : ESP32
 - [`tools/check-row-overlap-selftest.py`](tools/check-row-overlap-selftest.py) — 上面那个检查器的自检：喂进已知的坏排版，断言它确实报错。改了检查器就跑一次 `python tools/check-row-overlap-selftest.py`
 - [`docs/server/`](docs/server/) — M1b 服务器侧产物（脱敏模板，密钥一律 `<MONITOR_KEY>` 占位）
 
-### M1b 设备侧实现要点（已编译，未上板）
+### M1b 设备侧实现要点（已烧录上线，持续取数中）
 
 `src/health.cpp` 轮询两份文档、各自裁决：
 
@@ -175,7 +176,7 @@ focused screen     : ESP32
 
 **邮箱屏一页**（ADR-0001：未读数一屏列得下）：状态行（unconfigured / no data / stale / fresh）+ 未读大数字 + 账号/失败数 + 21 段 mailbox 段位条。按钮 A 在邮箱屏是空操作，按 ADR-0001 负面第 2 条与 ADR-0011 备注给 20 ms 极短提示音。
 
-### M1b 服务器侧产物（`docs/server/`，已写好未部署）
+### M1b 服务器侧产物（`docs/server/`，已部署到阿里云）
 
 四个文件，全部已在本机（Windows + Python 3.10）真跑验证：
 
@@ -226,7 +227,7 @@ M1a 的服务器侧**零改动**：设备轮询的是主站已有的公开端点
 
 **SPA catch-all 的教训保留在此**：M1b 端点上线前，`GET /status/snapshot.json` 返回 HTTP 200 + `<!doctype html>`（2026-10-17 用 `web_fetch` 核实），固件的 `[poll] snapshot body is not a complete flat JSON object` 是**预期行为**——第一道门（大括号配平）挡掉了 SPA 页面，没有把 HTML 当成数据。这是 [ADR-0008](docs/adr/0008-server-side-snapshot-via-cron.md) 「`location /status/` 必须插在 SPA fallback 之前」那条警告的现实来源，也是「两道接受门」设计价值的实证。
 
-M1a 上板实测（2026-10-17，COM4，串口日志）。单屏直连拓扑下：
+M1a 上板实测（2026-10-17，COM4，串口日志）。**当时的单屏直连绕行拓扑下**（现已恢复三屏）：
 
 ```
 === status-oled3 M1a boot report ===
@@ -248,24 +249,26 @@ net=up stale=no data_age=0s polls=4 up=52h35m51s commit=7153d58
 
 `panel : absent` 的原因：这次读数时屏幕没有接在 GPIO4/GPIO5 上（用户确认直连可行的那块屏当时不在板子上）。等屏接上，这一行应变 `online`，并且 ESP32 状态屏应显示 1s 递增的 uptime。
 
+> 📌 **这段 M1a 记录是单屏直连绕行期的读数**（见文首「屏幕拓扑」一节）。三屏恢复后，设备侧 boot report 打印的是 `pca9548a 0x70 : online` + 三块通道各自 online。**M1a 的数据链路结论与拓扑无关**——`[poll] ok` / `stale=no` 在两种拓扑下都成立。
+
 **上板时发现并已修正的一个 TLS 配置陷阱**（记在这里避免重犯）：第一次烧录后 `start_ssl_client: -1` 连续失败，而同一主机的明文 TCP 443 探测却通过。根因在框架里——`WiFiClientSecure` **既不调 `setCACert()` 也不调 `setInsecure()` 时**，`ssl_client.cpp:226-228` 会直接 `return -1`（「无 CA、无 bundle、且非 insecure」是它不接受的组合），与构造函数默认的「要校验」语义相反。现已在 `fetchOnce()` 里显式 `setInsecure()`，并在 `src/health.cpp` 头部注释与 [ADR-0006](docs/adr/0006-aggregator-url-pinning.md) 记录了取舍：负载公开、无凭据、字段形状可校验，伪造的最坏后果是屏幕数字错 + 提示音错；证书固定（保留校验）作为 M2 升级路径。**这不是「关掉校验就好」，是明确记录在案的安全姿态。**
 
-未提交、未推送的改动（截至 2026-10-17）：`.gitignore` 补 `**/.doc/`、`src/config.h` 按实测订正引脚并新增 M1 网络常量与 `ACTIVE_SCREENS` 拓扑开关、`src/main.cpp` 接入 M1a 数据链路、`src/health.cpp` 链路探测与 TLS 姿态、`src/pca9548a.*` 与 `src/screen.*` 的 `isDirect()` / `showable()` / `setFocused()` 单屏拓扑支持、`HARDWARE.md` §1.2/§4.5/§4.8 回写实测、`GLOSSARY.md` 与 `README.md` 同步、`docs/adr/0006` 补 `setInsecure()` 取舍、`docs/adr/0007` 脚位结论改为 bench 实测值、新增 `tools/i2c-probe/`、ADR-0008/0009/0010/0011 与 M1a 源码（`health.*` / `jsonfield.*` / `secrets.h.example`）、**ADR-0012 字段契约 + `docs/server/` 四个 M1b 服务器侧产物**、**M1b 设备侧实现**（`health.h/.cpp` 双文档轮询与 19+5 字段门面、`main.cpp` 服务器屏两页 + 邮箱屏未读数 + 未读上升沿、`jsonfield.h/.cpp` 新增 `hasKey()`、`screen.*` 页码标题与 mailbox 段位）。**按用户规则，无明确授权不 commit / push**，等用户确认后一并提交。
+> 📌 **本段原为 2026-10-17 的「未提交改动」清单，那些内容后来都已入库**（M1a 在 `53218a2`、M1b 在 `435b64f`、排版检查在 `282e68d`）。**当前工作树里 `status-oled3` 真正未提交的只有 2026-10-21 的一批文档订正**（`README.md` / `GLOSSARY.md` / ADR-0001~0007、0010 的脚位口径订正、`src/config.h` 的 GPIO 12 注释订正、`tools/i2c-probe` 的线序常量订正），**没有未提交的功能代码**。按用户规则，无明确授权不 commit / push。
 
-> 注：未提交改动中的 `HARDWARE.md` 是对仓库级文档的回写，`GLOSSARY.md` / `README.md` / ADR 是 status-oled3 内部同步，两者应一起提交以保持仓库一致。
+> 注：本仓库的 `HARDWARE.md` 是仓库级文档，`GLOSSARY.md` / `README.md` / ADR 是 status-oled3 内部同步，跨项目的订正（脚位口径、SDA/SCL 线序、`pet-oled3` 对齐）应放在同一批提交里以保持仓库一致。
 
-实测接线与初版规划的偏差（config.h 已按实测订正，本文档的硬件拓扑表同步订正）：
+实测接线与初版规划的偏差（config.h 已按实测订正，本文档的硬件拓扑表同步订正）。**表格里的「初版规划」是 2026-10-15 那版，`pet-oled3` 策划案同期的初版规划与之相同**——2026-10-21 `pet-oled3` 已按用户决策与本项目完全对齐：
 
-| 器件 | 初版规划 | 2026-10-16 实测 |
+| 器件 | 初版规划 | 2026-10-17 实测 |
 |---|---|---|
-| I2C SDA / SCL | GPIO 8 / GPIO 9 | **GPIO 4 / GPIO 5** |
+| I2C SDA / SCL | GPIO 8 / GPIO 9 | **SDA=GPIO 5 / SCL=GPIO 4**（`pet-oled3` 2026-10-21 已同步对齐） |
 | 按钮 A（翻页） | GPIO 10 | **GPIO 6** |
 | 按钮 B（换聚焦屏） | GPIO 11 | **GPIO 7** |
 | 有源蜂鸣器 | GPIO 12 | **GPIO 21** |
 
-上板接线（按实测；当前为单屏直连，PCA9548A 不接）：
+上板接线（按实测；**当前为三屏多路复用，PCA9548A 在链路里**）：
 
-- 上游 I2C：ESP32 GPIO4 → SSD1306 SDA，GPIO5 → SSD1306 SCL，3V3 / GND（**单屏版直连，不经过 PCA9548A**）
-- 三屏版：GPIO4/GPIO5 → PCA9548A SDA/SCL，3V3 / GND；PCA9548A A0 / A1 / A2 全部接地（= 0x70）；通道 0/1/2 各接一块 SSD1306（0x3C）；PCA9548A RST 接 GPIO8（拉高不动作，`as found=HIGH`，驱动低再释放不改变 0x70 无应答的结果）
+- 上游 I2C：ESP32 **GPIO5 → SSD1306 SDA、GPIO4 → SSD1306 SCL**，3V3 / GND（单屏直连绕行版则不经过 PCA9548A）
+- 三屏版（当前）：**GPIO5 → PCA9548A SDA、GPIO4 → PCA9548A SCL**，3V3 / GND；PCA9548A A0 / A1 / A2 全部接地（= 0x70）；通道 0/1/2 各接一块 SSD1306（0x3C）；PCA9548A RST 接 GPIO8（拉高不动作，`as found=HIGH`，驱动低再释放不改变 0x70 无应答的结果）
 - 按钮 A：GPIO6 与 GND 之间接轻触开关；按钮 B：GPIO7 与 GND
 - 蜂鸣器：GPIO21 与 GND（注意极性，长脚为正）

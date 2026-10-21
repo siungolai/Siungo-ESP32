@@ -5,8 +5,10 @@
  *   "g4 connects scl; g5 connects sda"
  * i.e. on the bench, GPIO4 -> module SCL and GPIO5 -> module SDA.
  *
- * config.h has I2C_SDA_PIN = 4 and I2C_SCL_PIN = 5, which is the opposite
- * order. So the two lines are crossed between firmware and wiring.
+ * config.h had I2C_SDA_PIN = 4 and I2C_SCL_PIN = 5, which is the opposite
+ * order. So the two lines were crossed between firmware and wiring. config.h
+ * was fixed to I2C_SDA_PIN = 5 / I2C_SCL_PIN = 4 on 2026-10-17; this tool
+ * keeps both orders in the scan so the crossing can never silently return.
  *
  * I2C START, STOP and ACK are all defined relative to SDA's edge against
  * SCL. Swap the two and no slave can ever recognise a START, which is
@@ -21,16 +23,16 @@
  *
  * Three scans in one run, so a single flashing settles the question:
  *   A1  EMPTY bus GPIO10/GPIO11   -- unchanged control, board stays honest
- *   A2  SDA=GPIO5 SCL=GPIO4       -- the order that matches the bench wiring
- *   A3  SDA=GPIO4 SCL=GPIO5       -- the order config.h currently asks for
+ *   A2  SDA=GPIO5 SCL=GPIO4       -- config.h's current order, matches the bench
+ *   A3  SDA=GPIO4 SCL=GPIO5       -- the crossed order that never answers
  */
 #include <Arduino.h>
 #include <Wire.h>
 
 namespace {
 
-constexpr uint8_t kSdaModule = 4;   // config.h: I2C_SDA_PIN
-constexpr uint8_t kSclModule = 5;   // config.h: I2C_SCL_PIN
+constexpr uint8_t kSdaModule = 5;   // config.h: I2C_SDA_PIN
+constexpr uint8_t kSclModule = 4;   // config.h: I2C_SCL_PIN
 constexpr uint8_t kSdaEmpty = 10;
 constexpr uint8_t kSclEmpty = 11;
 
@@ -161,7 +163,7 @@ void setup() {
   Serial.println();
   Serial.println("=== status-oled3 i2c-probe v7 (SDA/SCL order test) ===");
   Serial.println("bench wiring reported by operator: GPIO4->SCL, GPIO5->SDA");
-  Serial.println("config.h currently asks for:      GPIO4=SDA, GPIO5=SCL");
+  Serial.println("config.h currently asks for:      GPIO5=SDA, GPIO4=SCL");
   Serial.println();
   Serial.println("A2 is the order that matches the bench. If A2 ACKs 0x70 and");
   Serial.println("A3 does not, the lines are crossed and the fix is two pins");
@@ -170,9 +172,9 @@ void setup() {
 
   runScan(kSdaEmpty, kSclEmpty, "scan A1 EMPTY bus GPIO10/GPIO11 (control)");
 
-  runScan(kSclModule, kSdaModule, "scan A2 SDA=GPIO5 SCL=GPIO4 (matches bench)");
+  runScan(kSdaModule, kSclModule, "scan A2 SDA=GPIO5 SCL=GPIO4 (matches bench)");
 
-  runScan(kSdaModule, kSclModule, "scan A3 SDA=GPIO4 SCL=GPIO5 (config.h order)");
+  runScan(kSclModule, kSdaModule, "scan A3 SDA=GPIO4 SCL=GPIO5 (crossed order)");
 
   Wire.end();
   Serial.println();

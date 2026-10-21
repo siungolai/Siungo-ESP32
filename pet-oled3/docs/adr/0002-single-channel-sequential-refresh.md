@@ -59,11 +59,15 @@ PCA9548A 的核心卖点是**多通道并发**——控制寄存器的 1 字节�
 **每个时刻最多选通一个通道。** 驱动层不提供"多通道位掩码"接口，只提供：
 
 ```cpp
-bool pca9548a_select(uint8_t channel);   // 只选通这一个，其余全断
-bool pca9548a_deselect_all();
+namespace pca9548a {
+bool select(uint8_t channel);      // 只选通这一个，其余全断
+void deselectAll();
+}
 ```
 
 刻意**不暴露** `pca9548a_write_mask(uint8_t mask)` 这样的接口，从 API 层面杜绝误用。
+
+> 📌 **2026-10-21 订正**：初版此处写的是自由函数 `pca9548a_select()` / `pca9548a_deselect_all()`。实际实现（`status-oled3/src/pca9548a.h`，本项目直接复用）把它们放进 `pca9548a` 命名空间，且 `deselectAll()` 返回 `void`——断开是"尽力而为"的动作，不需要返回值。**接口以 `status-oled3/src/pca9548a.h` 为准**（见 [ADR-0006](0006-hardware-interface-aligned-with-status-oled3.md)）。
 
 ## 后果
 

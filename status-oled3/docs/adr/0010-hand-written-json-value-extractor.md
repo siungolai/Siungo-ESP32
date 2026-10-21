@@ -17,7 +17,7 @@ M1 设备侧要解析两个来源的 JSON：主站的 `GET /api/health`（[ADR-0
 - `status-oled3` 的 `platformio.ini` 与 `clock-oled` 完全同套，**没有 `lib_deps`**。整个仓库唯一的 `lib_deps` 是 `blink3` 的 Adafruit NeoPixel。本项目到 M0 为止是零依赖的裸驱风格。
 - 两个端点的 JSON 都是**扁平结构**，无嵌套对象、无数组（指标快照的子项可以是扁平键，不需要层级）。
 - `framework-arduinoespressif32` 自带 `WiFi` / `WiFiClientSecure` / `HTTPClient`，M1 不需要为网络加依赖。
-- ESP32-S3 的资源基线：M0 固件 RAM 6.8%（22356/327680）/ Flash 8.6%（286541/3342336）；`clock-oled` 叠加 WiFi 栈后是 RAM 14.1% / Flash 21.5%（[`../../HARDWARE.md`](../../HARDWARE.md) §9）。
+- ESP32-S3 的资源基线：M0 固件 RAM 6.8%（22356/327680）/ Flash 8.6%（286541/3342336）；`clock-oled` 叠加 WiFi 栈后是 RAM 14.1% / Flash 21.5%（[`../../../HARDWARE.md`](../../../HARDWARE.md) §9）。
 
 ## 考虑的方案
 
