@@ -113,4 +113,4 @@ void begin() {
 
 > 📌 **"代码里写了"不等于"生效了"**——所以 boot report 用 `gpio_get_drive_capability()` **把寄存器读回来**再打印，而不是只打印一个常量。这是本项目验证驱动强度的固定做法。
 >
-> 📌 **`status-oled3` 已于 2026-10-21 补齐**（本 ADR 首次落盘时它还是"只写不读"）：`buzzer::begin()` 现在先设驱动强度，boot report 也读回。**代码已改、已编译通过（RAM 16.3% / Flash 26.9%），但 `status-oled3` 的这版固件尚未上板复测**——它读回时应当看到 `drive cap=3`，这一点留待下次烧录时确认。
+> 📌 **`status-oled3` 已于 2026-10-21 补齐**（本 ADR 首次落盘时它还是"只写不读"）：`buzzer::begin()` 现在先设驱动强度，boot report 也读回。**2026-10-22 已上板复测**——烧录后 boot report 读到 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`，**寄存器读回值 = 3，与请求值一致，驱动强度确实落到硬件上了**。原始记录见 [`../../../status-oled3/.doc/m1b-boot-20261022.txt`](../../../status-oled3/.doc/m1b-boot-20261022.txt)（过程产物，已 gitignore）。

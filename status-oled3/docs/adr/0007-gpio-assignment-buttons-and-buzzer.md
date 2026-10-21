@@ -97,6 +97,8 @@
 >
 > **处置（2026-10-21 已落地）**：`buzzer::begin()` 先调 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)` **再** `pinMode()`，boot report 用 `gpio_get_drive_capability()` **把寄存器读回来**打印 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。
 >
+> 📌 **2026-10-22 已上板复测**：烧录后 boot report 实测读到 **`drive cap=3 (want 3) readback ok`**——寄存器读回值与请求值一致，**驱动强度确实落到了硬件上**（不是「代码里写了就算」）。原始记录见 [`../../.doc/m1b-boot-20261022.txt`](../../.doc/m1b-boot-20261022.txt)（过程产物，已 gitignore）。
+>
 > 为什么必须显式调：Arduino 核心的 `pinMode()` 只调 `gpio_config()`，**不碰 `FUN_DRV` 寄存器**，驱动强度保持芯片默认档（`GPIO_DRIVE_CAP_DEFAULT = 2` = medium）。`driver/gpio.h` 在 Arduino 工程里可直接 `#include`，已用最小 Arduino 工程编译验证可用。
 >
 > 完整证据链与 NPN 三极管兜底方案见 [`../../../pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md`](../../../pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)（同款蜂鸣器、同一个 GPIO 21，本项目与 `pet-oled3` 共用这份结论）。

@@ -90,12 +90,42 @@ wifi: connected, IP=192.168.1.100 RSSI=-47 dBm
 [poll] ok uptime=63h48m32s commit=7153d58 built=2026-10-14T12:36:39Z
 ```
 
-> 📌 **boot report 新增一行**（2026-10-21）：`buzzer pin         : GPIO21 drive cap=3 (want 3) readback ok`。这是把蜂鸣器脚的**驱动强度从寄存器读回来**打印，不是打印一个常量——「代码里写了」不等于「硬件生效了」。**这版固件尚未上板复测**，下次烧录时应看到该行输出 `drive cap=3`。
+> 📌 **boot report 新增一行**（2026-10-21）：`buzzer pin         : GPIO21 drive cap=3 (want 3) readback ok`。这是把蜂鸣器脚的**驱动强度从寄存器读回来**打印，不是打印一个常量——「代码里写了」不等于「硬件生效了」。**2026-10-22 已上板复测通过**，读到 `drive cap=3`（见下节「2026-10-22 上板复测」）。
 >
 > - **字模方向**：三块屏上的字无上下镜像，`0xC8`（COM 扫描反向）正确，`fontDirProbe()` 自检通过
 > - **按钮**：A（GPIO6）翻页、B（GPIO7）切换聚焦屏，聚焦屏标题栏反色可见
 > - **蜂鸣器**：修订后两个按钮的每次短按都极短响 1 次（见 [ADR-0003](docs/adr/0003-active-buzzer-on-off-encoding.md) 的「按钮反馈」修订）
 > - HARDWARE.md §4.8 七项 checklist 全部有结论
+
+### 2026-10-22 上板复测（驱动强度读回）
+
+烧录 `9827529`（`fix(oled3): 蜂鸣器脚驱动强度提到 CAP_3`）后复测，COM4 @ 115200：
+
+```
+=== status-oled3 M1b boot report ===
+pca9548a 0x70      : online
+screen ch0 (ESP32) : online
+screen ch1 (SERVER) : online
+screen ch2 (MAILBOX) : online
+focused screen     : ESP32
+data source        : https://www.siungo.top/status/snapshot.json + /status/mailbox.json
+poll interval      : 15 s, stale after 60 s; mailbox every 300 s, stale after 480 s
+pages              : local=1 server=2 mailbox=1
+buzzer pin         : GPIO21 drive cap=3 (want 3) readback ok
+==================================
+```
+
+| 验项 | 结果 |
+|---|---|
+| **驱动强度读回** | **`drive cap=3 (want 3) readback ok`** —— `gpio_get_drive_capability()` 读回寄存器值 = 3，与 `gpio_set_drive_capability()` 请求的 `GPIO_DRIVE_CAP_3` 一致。**驱动强度确实落到硬件上了**，不再是「代码里写了就算」 |
+| PCA9548A | `0x70 : online` |
+| 三块屏 | ch0 / ch1 / ch2 **全部 online**（三屏拓扑，不是单屏直连绕行） |
+| WiFi | 关联成功，`IP=192.168.1.100` |
+| 轮询 | `[poll] snapshot ok polls=N` 连续递增，`net=up snap=fresh age=0s` |
+
+> 📌 **板子复位后 boot report 之后紧跟 `edge: wifi lost` 是预期行为**——`rst:0x15 (USB_UART_CHIP_RESET)` 后 WiFi 必然先掉一次再重连，**不是故障**。
+>
+> 📌 原始记录见 [`.doc/m1b-boot-20261022.txt`](.doc/m1b-boot-20261022.txt)（过程产物，已 gitignore）。
 
 完整排查史与证据链见 [`.doc/i2c-absent-investigation-2026-10-17.md`](.doc/i2c-absent-investigation-2026-10-17.md)（过程产物，已 gitignore）。
 
@@ -255,7 +285,7 @@ net=up stale=no data_age=0s polls=4 up=52h35m51s commit=7153d58
 
 **上板时发现并已修正的一个 TLS 配置陷阱**（记在这里避免重犯）：第一次烧录后 `start_ssl_client: -1` 连续失败，而同一主机的明文 TCP 443 探测却通过。根因在框架里——`WiFiClientSecure` **既不调 `setCACert()` 也不调 `setInsecure()` 时**，`ssl_client.cpp:226-228` 会直接 `return -1`（「无 CA、无 bundle、且非 insecure」是它不接受的组合），与构造函数默认的「要校验」语义相反。现已在 `fetchOnce()` 里显式 `setInsecure()`，并在 `src/health.cpp` 头部注释与 [ADR-0006](docs/adr/0006-aggregator-url-pinning.md) 记录了取舍：负载公开、无凭据、字段形状可校验，伪造的最坏后果是屏幕数字错 + 提示音错；证书固定（保留校验）作为 M2 升级路径。**这不是「关掉校验就好」，是明确记录在案的安全姿态。**
 
-> 📌 **本段原为 2026-10-17 的「未提交改动」清单，那些内容后来都已入库**（M1a 在 `53218a2`、M1b 在 `435b64f`、排版检查在 `282e68d`）。**当前工作树里 `status-oled3` 的未提交内容有两批**：① 2026-10-21 的一批文档订正（`README.md` / `GLOSSARY.md` / ADR-0001~0007、0010 的脚位口径订正、`src/config.h` 的 GPIO 12 注释订正、`tools/i2c-probe` 的线序常量订正）；② 2026-10-21 晚些时候的**功能代码改动**——`src/buzzer.cpp` / `src/buzzer.h` / `src/config.h` / `src/main.cpp` 把 GPIO21 的驱动强度提到 `GPIO_DRIVE_CAP_3` 并在 boot report 读回（见下文「接线」小节与 [ADR-0007](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)）。**这版固件已编译通过（RAM 16.3% / Flash 26.9%），但尚未上板复测。** 按用户规则，无明确授权不 commit / push。
+> 📌 **本段原为 2026-10-17 的「未提交改动」清单，那些内容后来都已入库**（M1a 在 `53218a2`、M1b 在 `435b64f`、排版检查在 `282e68d`）。**当前工作树里 `status-oled3` 的未提交内容有三批**：① 2026-10-21 的一批文档订正（`README.md` / `GLOSSARY.md` / ADR-0001~0007、0010 的脚位口径订正、`src/config.h` 的 GPIO 12 注释订正、`tools/i2c-probe` 的线序常量订正）；② 2026-10-21 晚些时候的**功能代码改动**——`src/buzzer.cpp` / `src/buzzer.h` / `src/config.h` / `src/main.cpp` 把 GPIO21 的驱动强度提到 `GPIO_DRIVE_CAP_3` 并在 boot report 读回（见下文「接线」小节与 [ADR-0007](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)）；③ 2026-10-22 的**上板复测记录**（读回 = 3，见上文「2026-10-22 上板复测」）。**这版固件已编译通过（RAM 16.3% / Flash 26.9%）并已上板复测**（`drive cap=3 (want 3) readback ok`）。按用户规则，无明确授权不 commit / push。
 
 > 注：本仓库的 `HARDWARE.md` 是仓库级文档，`GLOSSARY.md` / `README.md` / ADR 是 status-oled3 内部同步，跨项目的订正（脚位口径、SDA/SCL 线序、`pet-oled3` 对齐）应放在同一批提交里以保持仓库一致。
 

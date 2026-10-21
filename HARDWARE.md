@@ -69,7 +69,7 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 >
 > `driver/gpio.h` 在 Arduino 工程里可直接 `#include`（`Arduino.h → esp32-hal.h → esp32-hal-dac.h` 已把它带进 include 链），**已用最小 Arduino 工程编译验证可用**。适用于**所有源端驱动大电流的场合**——目前本机只有 GPIO 21 蜂鸣器一处。详见 [`pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md`](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)。
 >
-> 📌 **落地状态（2026-10-21）**：**两个项目都已落实**。`pet-oled3/src/buzzer.cpp` 与 `status-oled3/src/buzzer.cpp` 的 `begin()` 都在 `pinMode()` **之前**调 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`；两个项目的 boot report 都用 `gpio_get_drive_capability()` **把驱动档读回来**打印（`pet-oled3` 已上板读回 = 3；`status-oled3` 已编译通过，**尚未上板复测**）。
+> 📌 **落地状态（2026-10-22）**：**两个项目都已落实，且都已在硬件上验证**。`pet-oled3/src/buzzer.cpp` 与 `status-oled3/src/buzzer.cpp` 的 `begin()` 都在 `pinMode()` **之前**调 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`；两个项目的 boot report 都用 `gpio_get_drive_capability()` **把驱动档读回来**打印——`pet-oled3` 2026-10-21 M0 读回 **= 3**，`status-oled3` 2026-10-22 上板读回 **= 3**（`drive cap=3 (want 3) readback ok`）。
 >
 > 📌 **验收做法**：驱动强度这种「写在代码里」的项，**必须读回寄存器才算数**——「代码里写了」不等于「硬件生效了」。boot report 打印寄存器实际值，是这类项的固定验收方式。
 
@@ -601,7 +601,9 @@ A0 = pin22、A1 = pin23、A2 = pin18，各自直连 VCC 或 GND；RESET = pin24�
 >
 > 📌 **本节七项已由两个项目各自实测，仓库内不再有「PCA9548A 通路待验证」的事项。** `pet-oled3` 的 [ADR-0006](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md) 已按实现签名订正。
 >
-> 📌 **2026-10-21 补充：GPIO 21 蜂鸣器的驱动强度在两个项目里都已落地。** `status-oled3` 的 `buzzer::begin()` 原来只做 `pinMode()`（**不设驱动强度**，见 §1.2 尾注），2026-10-21 已补上 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`（**在 `pinMode()` 之前**），boot report 也改为用 `gpio_get_drive_capability()` **把驱动档读回来**打印 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。`status-oled3` 这版固件**已编译通过但尚未上板复测**，下次烧录时应看到该行。
+> 📌 **2026-10-21 补充：GPIO 21 蜂鸣器的驱动强度在两个项目里都已落地。** `status-oled3` 的 `buzzer::begin()` 原来只做 `pinMode()`（**不设驱动强度**，见 §1.2 尾注），2026-10-21 已补上 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`（**在 `pinMode()` 之前**），boot report 也改为用 `gpio_get_drive_capability()` **把驱动档读回来**打印 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。
+>
+> 📌 **2026-10-22 上板复测通过**：`status-oled3` 烧录 `9827529` 后实测读到 **`drive cap=3 (want 3) readback ok`**（寄存器读回值与请求值一致），同时 `pca9548a 0x70 : online`、三屏 ch0/ch1/ch2 全部 online、WiFi 与轮询正常。**两个项目的驱动强度都已在硬件上验证**——`pet-oled3` 2026-10-21 M0 读回 = 3，`status-oled3` 2026-10-22 读回 = 3。原始记录见 `status-oled3/.doc/m1b-boot-20261022.txt`（过程产物，已 gitignore）。
 
 > 📌 **2026-10-21 订正**：本节标题已从「待本机验证（bringup 必做）」改为「已验证（2026-10-17）」；原第 575 行的待办（"完成后回写本节"）**已执行**——[§4.7](#47-驱动接口已实现2026-10-17) 的规划接口已替换为实现签名。
 > `pet-oled3` 的 M0 **已于 2026-10-21 完成复现**（结论一致，见上方复现确认块），不必重查地址、线序、上拉、模块好坏。见 [`pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md`](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md)。
