@@ -23,6 +23,11 @@
  *
  * M2 note: no mute switch by design (user decision). If a silent mode is
  * ever wanted, add a config flag and check it here, not at the call sites.
+ *
+ * Drive strength: begin() also raises the buzzer pin's pad drive capability
+ * to GPIO_DRIVE_CAP_3 (40 mA source current). The default for GPIO 21 is
+ * only 20 mA while a typical active buzzer draws 20-30 mA, so the default
+ * is right at the edge. See docs/adr/0007 and the config.h comment.
  */
 #pragma once
 

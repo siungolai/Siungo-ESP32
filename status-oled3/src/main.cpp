@@ -35,6 +35,10 @@
  */
 #include <Arduino.h>
 #include <WiFi.h>
+// The boot report reads the buzzer pin's pad drive capability back from the
+// hardware (see the buzzer block below). That needs the IDF GPIO driver
+// header; it is included explicitly rather than relied upon transitively.
+#include <driver/gpio.h>
 
 #include <cmath>
 #include <cstdio>
@@ -711,6 +715,30 @@ void printBootReport() {
   Serial.print(static_cast<unsigned>(g_page_count[screen::SCREEN_SERVER]));
   Serial.print(" mailbox=");
   Serial.println(static_cast<unsigned>(g_page_count[screen::SCREEN_MAILBOX]));
+
+  // Drive capability of the buzzer pin, READ BACK from the hardware.
+  //
+  // The buzzer is wired GPIO21 -> buzzer+ , buzzer- -> GND, so the ESP32
+  // SOURCES the current and the pad's drive capability is what limits it:
+  // the default for GPIO21 is 20 mA (ESP32-S3 datasheet v2.2 section 2.3.4
+  // note 5) while a typical active buzzer draws 20-30 mA. buzzer::begin()
+  // raises it to GPIO_DRIVE_CAP_3 (40 mA source).
+  //
+  // Printing the value the register actually holds is the difference
+  // between "the code says so" and "the hardware says so" -- a silently weak
+  // buzzer is exactly the kind of fault that gets blamed on the hardware.
+  gpio_drive_cap_t cap = GPIO_DRIVE_CAP_0;
+  const esp_err_t capErr = gpio_get_drive_capability(
+      static_cast<gpio_num_t>(config::PIN_BUZZER), &cap);
+  Serial.print("buzzer pin         : GPIO");
+  Serial.print(static_cast<unsigned>(config::PIN_BUZZER));
+  Serial.print(" drive cap=");
+  Serial.print(static_cast<int>(cap));
+  Serial.print(" (want ");
+  Serial.print(static_cast<unsigned>(config::BUZZER_DRIVE_CAP));
+  Serial.print(") readback ");
+  Serial.println(capErr == ESP_OK ? "ok" : "FAILED");
+
   Serial.println("==================================");
   Serial.println();
 }

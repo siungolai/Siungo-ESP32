@@ -94,7 +94,7 @@ PCA9548A 把一根总线上游分成 8 路下游通道，三块屏各挂一路�
 |---|---|---|
 | 按钮 A（选动作 / 光标下移） | **GPIO 6** | `INPUT_PULLUP`，按下接地为低 |
 | 按钮 B（确认 / 执行） | **GPIO 7** | `INPUT_PULLUP`，按下接地为低 |
-| 有源蜂鸣器 | **GPIO 21** | 推挽输出，**HIGH 响**；只做通断节奏，不出音阶。⚠️ **固件必须把该脚驱动强度提到 `GPIO_DRIVE_CAP_3`**（默认档只有 20 mA，蜂鸣器典型 20–30 mA，属临界）——[ADR-0010](docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md) |
+| 有源蜂鸣器 | **GPIO 21** | 推挽输出，**HIGH 响**；只做通断节奏，不出音阶。⚠️ **固件必须把该脚驱动强度提到 `GPIO_DRIVE_CAP_3`**（默认档只有 20 mA，蜂鸣器典型 20–30 mA，属临界）——[ADR-0010](docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)。**2026-10-21 起 `status-oled3` 也这样做了，两个项目一致** |
 | WS2812 RGB | **GPIO 48** | 板载，固定 |
 
 完整 GPIO 分配总表见 [`docs/策划案.md` §3.5](docs/策划案.md)。
@@ -187,7 +187,7 @@ M0 的固件在 `src/main.cpp`；串口原始记录在 `.doc/m0-serial-20261021.
 | 三屏显示层（逐通道探测 + 离线跳过 + 脏标记 + 分页 + 焦点） | `status-oled3` | ✅ **直接复用**，换绘制内容 |
 | SSD1306 裸驱（1KB 显存 + 5×7 字库 + 中文 + 2 倍放大） | `status-oled3` | ✅ **直接复用** |
 | 按钮驱动（4 态消抖 + 长按阈值 + 一次按下一次事件） | `status-oled3` | ✅ **直接复用** |
-| 蜂鸣器驱动（通断节奏） | `status-oled3` | ⚠️ **复用节奏表，但 `begin()` 必须改**：加 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`（[ADR-0010](docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)） |
+| 蜂鸣器驱动（通断节奏） | `status-oled3` | ✅ **复用节奏表与驱动**。📌 `begin()` 里的 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)` **两个项目现在都有**（2026-10-21 `status-oled3` 补齐），写法一致（[ADR-0010](docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)） |
 | 引脚常量与消抖/节奏常量 | `status-oled3/src/config.h` | ✅ **直接复用** |
 | I2C 扫描 / 引脚探测诊断 | `status-oled3/tools/i2c-probe/` | ✅ bringup 必备（**先查线序再扫**）。**本项目自有副本在 `pet-oled3/tools/i2c-probe/`**（已编译验证通过：RAM 5.8% / Flash 8.5%），M0 期间作为独立诊断固件备用 |
 | WS2812 驱动 | `blink3` | ✅ 复用（唯一引入第三方库的项目） |

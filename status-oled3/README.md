@@ -21,7 +21,7 @@ ESP32-S3 + PCA9548A + 三块 SSD1306 的桌面状态显示器。三块屏分别�
 |---|---|---|
 | 按钮 A（聚焦屏翻页） | GPIO 6，内部上拉 | 短按 = 聚焦屏翻到下一页 |
 | 按钮 B（切换聚焦屏） | GPIO 7，内部上拉 | 短按 = 聚焦屏 0→1→2→0 循环 |
-| 有源蜂鸣器 | GPIO 21，推挽通断 | 有源型，只能通断编码 |
+| 有源蜂鸣器 | GPIO 21，推挽通断 | 有源型，只能通断编码；**固件把该脚驱动强度提到 `GPIO_DRIVE_CAP_3`**（默认 20 mA 临界，见下文「接线」小节） |
 
 引脚依据见 [`docs/adr/0007-gpio-assignment-buttons-and-buzzer.md`](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)。初版规划曾是 GPIO10/11/12，2026-10-16 按 bench 实际接线订正——**理由是保持与实物一致**，不是 GPIO 12 有禁忌（datasheet v2.2 核实：strapping 脚只有 GPIO 0/3/45/46，MTDI 是 GPIO 41，GPIO 12 是 P2 普通 IO）。
 
@@ -90,10 +90,12 @@ wifi: connected, IP=192.168.1.100 RSSI=-47 dBm
 [poll] ok uptime=63h48m32s commit=7153d58 built=2026-10-14T12:36:39Z
 ```
 
-- **字模方向**：三块屏上的字无上下镜像，`0xC8`（COM 扫描反向）正确，`fontDirProbe()` 自检通过
-- **按钮**：A（GPIO6）翻页、B（GPIO7）切换聚焦屏，聚焦屏标题栏反色可见
-- **蜂鸣器**：修订后两个按钮的每次短按都极短响 1 次（见 [ADR-0003](docs/adr/0003-active-buzzer-on-off-encoding.md) 的「按钮反馈」修订）
-- HARDWARE.md §4.8 七项 checklist 全部有结论
+> 📌 **boot report 新增一行**（2026-10-21）：`buzzer pin         : GPIO21 drive cap=3 (want 3) readback ok`。这是把蜂鸣器脚的**驱动强度从寄存器读回来**打印，不是打印一个常量——「代码里写了」不等于「硬件生效了」。**这版固件尚未上板复测**，下次烧录时应看到该行输出 `drive cap=3`。
+>
+> - **字模方向**：三块屏上的字无上下镜像，`0xC8`（COM 扫描反向）正确，`fontDirProbe()` 自检通过
+> - **按钮**：A（GPIO6）翻页、B（GPIO7）切换聚焦屏，聚焦屏标题栏反色可见
+> - **蜂鸣器**：修订后两个按钮的每次短按都极短响 1 次（见 [ADR-0003](docs/adr/0003-active-buzzer-on-off-encoding.md) 的「按钮反馈」修订）
+> - HARDWARE.md §4.8 七项 checklist 全部有结论
 
 完整排查史与证据链见 [`.doc/i2c-absent-investigation-2026-10-17.md`](.doc/i2c-absent-investigation-2026-10-17.md)（过程产物，已 gitignore）。
 
@@ -110,7 +112,7 @@ wifi: connected, IP=192.168.1.100 RSSI=-47 dBm
 | `ssd1306_i2c.h/.cpp` | SSD1306 裸驱，从 `clock-oled` 逐字复用 |
 | `screen.h/.cpp` | 三屏抽象：在线缓存、脏标记、标题栏反色、页状态 |
 | `button.h/.cpp` | 两只按钮的软件消抖状态机，非阻塞 |
-| `buzzer.h/.cpp` | 有源蜂鸣器通断编码，[ADR-0003](docs/adr/0003-active-buzzer-on-off-encoding.md) 的节奏表 |
+| `buzzer.h/.cpp` | 有源蜂鸣器通断编码，[ADR-0003](docs/adr/0003-active-buzzer-on-off-encoding.md) 的节奏表；`begin()` 还负责把 GPIO21 的驱动强度提到 `GPIO_DRIVE_CAP_3`（默认 20 mA 不够，见下文「接线」小节） |
 | `main.cpp` | M1b 主循环：五个独立节奏（按钮 / 网络 / ESP32 屏 1s / 另两屏按需 / 串口日志 60s）+ 三屏绘制 + 上升沿提示 |
 
 M1a 新增三个文件：
@@ -253,7 +255,7 @@ net=up stale=no data_age=0s polls=4 up=52h35m51s commit=7153d58
 
 **上板时发现并已修正的一个 TLS 配置陷阱**（记在这里避免重犯）：第一次烧录后 `start_ssl_client: -1` 连续失败，而同一主机的明文 TCP 443 探测却通过。根因在框架里——`WiFiClientSecure` **既不调 `setCACert()` 也不调 `setInsecure()` 时**，`ssl_client.cpp:226-228` 会直接 `return -1`（「无 CA、无 bundle、且非 insecure」是它不接受的组合），与构造函数默认的「要校验」语义相反。现已在 `fetchOnce()` 里显式 `setInsecure()`，并在 `src/health.cpp` 头部注释与 [ADR-0006](docs/adr/0006-aggregator-url-pinning.md) 记录了取舍：负载公开、无凭据、字段形状可校验，伪造的最坏后果是屏幕数字错 + 提示音错；证书固定（保留校验）作为 M2 升级路径。**这不是「关掉校验就好」，是明确记录在案的安全姿态。**
 
-> 📌 **本段原为 2026-10-17 的「未提交改动」清单，那些内容后来都已入库**（M1a 在 `53218a2`、M1b 在 `435b64f`、排版检查在 `282e68d`）。**当前工作树里 `status-oled3` 真正未提交的只有 2026-10-21 的一批文档订正**（`README.md` / `GLOSSARY.md` / ADR-0001~0007、0010 的脚位口径订正、`src/config.h` 的 GPIO 12 注释订正、`tools/i2c-probe` 的线序常量订正），**没有未提交的功能代码**。按用户规则，无明确授权不 commit / push。
+> 📌 **本段原为 2026-10-17 的「未提交改动」清单，那些内容后来都已入库**（M1a 在 `53218a2`、M1b 在 `435b64f`、排版检查在 `282e68d`）。**当前工作树里 `status-oled3` 的未提交内容有两批**：① 2026-10-21 的一批文档订正（`README.md` / `GLOSSARY.md` / ADR-0001~0007、0010 的脚位口径订正、`src/config.h` 的 GPIO 12 注释订正、`tools/i2c-probe` 的线序常量订正）；② 2026-10-21 晚些时候的**功能代码改动**——`src/buzzer.cpp` / `src/buzzer.h` / `src/config.h` / `src/main.cpp` 把 GPIO21 的驱动强度提到 `GPIO_DRIVE_CAP_3` 并在 boot report 读回（见下文「接线」小节与 [ADR-0007](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)）。**这版固件已编译通过（RAM 16.3% / Flash 26.9%），但尚未上板复测。** 按用户规则，无明确授权不 commit / push。
 
 > 注：本仓库的 `HARDWARE.md` 是仓库级文档，`GLOSSARY.md` / `README.md` / ADR 是 status-oled3 内部同步，跨项目的订正（脚位口径、SDA/SCL 线序、`pet-oled3` 对齐）应放在同一批提交里以保持仓库一致。
 
@@ -272,3 +274,7 @@ net=up stale=no data_age=0s polls=4 up=52h35m51s commit=7153d58
 - 三屏版（当前）：**GPIO5 → PCA9548A SDA、GPIO4 → PCA9548A SCL**，3V3 / GND；PCA9548A A0 / A1 / A2 全部接地（= 0x70）；通道 0/1/2 各接一块 SSD1306（0x3C）；PCA9548A RST 接 GPIO8（拉高不动作，`as found=HIGH`，驱动低再释放不改变 0x70 无应答的结果）
 - 按钮 A：GPIO6 与 GND 之间接轻触开关；按钮 B：GPIO7 与 GND
 - 蜂鸣器：GPIO21 与 GND（注意极性，长脚为正）
+
+> ⚠️ **蜂鸣器脚必须提到最强驱动档**（2026-10-21 补上，`pet-oled3` 同期）：GPIO21 的默认驱动档只有 **20 mA**（ESP32-S3 datasheet v2.2 §2.3.4 注 5：GPIO17/18 = 10 mA、GPIO19/20 = 40 mA、**其余 = 20 mA**），而有源蜂鸣器典型 **20–30 mA**——属临界档，30 mA 型号会欠压、音量下降甚至不响。`buzzer::begin()` 现在**先调 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`（40 mA 源电流）再 `pinMode()`**，boot report 会把驱动档**读回来**打印：`buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。
+>
+> 注意 Arduino 核心的 `pinMode()` **不设驱动强度**（`__pinMode()` 只调 `gpio_config()`，不碰 `FUN_DRV` 寄存器），必须显式调用。证据链见 [`../pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md`](../pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)（同款蜂鸣器、同一个 GPIO 21），兜底方案是加 NPN 三极管（脚位不变）。

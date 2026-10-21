@@ -81,7 +81,25 @@
 
 按钮的消抖在软件里做（`millis()` 时间窗 + 状态机），不依赖外部 RC——轻触按钮的抖动窗口通常在 5–20 ms，软件消抖足够，且省两个电阻。
 
-蜂鸣器不接 PWM（见 [ADR-0003](0003-active-buzzer-on-off-encoding.md)），GPIO 21 只做通断，振荡由蜂鸣器内部电路完成。注意有源蜂鸣器的电流：ESP32-S3 单脚默认驱动强度 20 mA（[`../../../HARDWARE.md`](../../../HARDWARE.md) §1.2 注），有源蜂鸣器典型 20–30 mA，若实测音量为可接受则直驱；若音小或脚烫，加一只 NPN 三极管驱动——那是实现期的事，不改本决策的脚位。
+蜂鸣器不接 PWM（见 [ADR-0003](0003-active-buzzer-on-off-encoding.md)），GPIO 21 只做通断，振荡由蜂鸣器内部电路完成。
+
+> ⚠️ **2026-10-21 补充：GPIO 21 的驱动强度必须提到 `GPIO_DRIVE_CAP_3`（本 ADR 原文的「电流风险」已从「待实现期确认」升级为「已在固件里落实」）。**
+>
+> 原文写的是「ESP32-S3 单脚默认驱动强度 20 mA，有源蜂鸣器典型 20–30 mA，若实测音量为可接受则直驱；若音小或脚烫，加一只 NPN 三极管驱动——那是实现期的事」。查 ESP32-S3 datasheet v2.2 后可以**不用等实测**：
+>
+> | 数据 | 值 | 出处 |
+> |---|---|---|
+> | 各脚默认驱动强度 | GPIO17/18 = 10 mA；GPIO19/20 = 40 mA；**其余 = 20 mA** | datasheet v2.2 §2.3.4 注 5 |
+> | **GPIO 21 属于哪一档** | **"All other pins" = 20 mA 默认档** | 同上 |
+> | `I_OH` 源电流 | **40 mA**（VDD = 3.3 V，V_OH ≥ 2.64 V，**PAD_DRIVER = 3**） | IO 电气特性表 |
+>
+> 所以 GPIO 21 的默认 20 mA 对典型 20–30 mA 的有源蜂鸣器**属于临界**：30 mA 型号会欠压（`V_OH` 掉到 2.64 V 以下，音量下降甚至不响）。
+>
+> **处置（2026-10-21 已落地）**：`buzzer::begin()` 先调 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)` **再** `pinMode()`，boot report 用 `gpio_get_drive_capability()` **把寄存器读回来**打印 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。
+>
+> 为什么必须显式调：Arduino 核心的 `pinMode()` 只调 `gpio_config()`，**不碰 `FUN_DRV` 寄存器**，驱动强度保持芯片默认档（`GPIO_DRIVE_CAP_DEFAULT = 2` = medium）。`driver/gpio.h` 在 Arduino 工程里可直接 `#include`，已用最小 Arduino 工程编译验证可用。
+>
+> 完整证据链与 NPN 三极管兜底方案见 [`../../../pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md`](../../../pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)（同款蜂鸣器、同一个 GPIO 21，本项目与 `pet-oled3` 共用这份结论）。
 
 ## 后果
 
@@ -95,11 +113,11 @@
 
 1. **三个器件分散在 6/7/21**，不再是连号：万用表查线时要对照表格而不是「相邻三针」。代价很小（三根线）
 2. **GPIO 7 与 `dht11-oled` 的 DHT11 数据脚二选一**：两个项目不能同时上电。§1.2 已有该行记录，用「项目」列区分即可
-3. **蜂鸣器直驱的电流风险**：见上文，若音小/发热则加三极管，属于可预期的迭代
+3. **蜂鸣器直驱的电流风险**：**已按 datasheet 结案**（2026-10-21）——固件把 GPIO 21 的驱动强度提到 `GPIO_DRIVE_CAP_3`（40 mA 源电流），不再是默认的 20 mA 临界档。若日后实测音量仍不足（说明实际电流 > 40 mA），兜底是加 NPN 三极管，**脚位不变**
 
 ## 备注
 
-- 本决策只定脚位，不定电气细节（上拉阻值、是否需要外部下拉、蜂鸣器是否加三极管）——那些在 M0 bringup 时实测确认
+- 本决策只定脚位，不定电气细节（上拉阻值、是否需要外部下拉、蜂鸣器是否加三极管）——那些在 M0 bringup 时实测确认。**（2026-10-21 更新：蜂鸣器的电流这一项已提前用 datasheet 结案，不必等实测；上拉归属同样已在 `pet-oled3` 用脚本量化结案。）**
 - 若实测发现 GPIO 6 / 7 有异常（例如与 USB 串口有干扰），在同一段内平移到 GPIO 10 / 13 / 14 的代价只是改三个常量
 - **教训**：本 ADR 旧版把 GPIO 12 误记为「MTDI strapping 脚」，而 datasheet v2.2 明确 strapping 脚只有 GPIO 0/3/45/46、MTDI 是 GPIO 41。**教训本身仍然成立但结论要改写**：错误不在「§1.2 的 GPIO 表漏标了 12」，而在「没人核对过 datasheet 就把 12 写进了禁区表」。§1.2 的 GPIO 表已按 datasheet v2.2 订正（GPIO 12 归为普通 IO，strapping 脚行只留 0/3/45/46），见 [§1.2](#12-gpio-资源与占用约束)
 - **元教训**：写「某脚是 strapping / 某某用途」这类**规格性断言**时，必须能指到 datasheet 的具体章节，否则只能写成「未在本机核实」。本 ADR 曾用一条查证成本极低、收益极高（避免一次 36 小时级别的排查）却没做的核对，换来一个假禁区

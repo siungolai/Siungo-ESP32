@@ -59,9 +59,11 @@ void begin() {
   // anyway: relying on a transitive include is a trap that breaks silently
   // when someone reorganises a header.
   //
-  // NOTE: status-oled3/src/buzzer.cpp does NOT do this, and it has the same
-  // physical buzzer on the same pin. Do not copy that file's begin() over
-  // this one. Evidence: docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md
+  // NOTE: status-oled3/src/buzzer.cpp used to skip this step (it only called
+  // pinMode()), and it has the same physical buzzer on the same pin. That was
+  // fixed on 2026-10-21 -- both projects now do this, so the two begin()
+  // functions agree. Do not "simplify" this one back to pinMode() only.
+  // Evidence: docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md
   const esp_err_t err = gpio_set_drive_capability(
       static_cast<gpio_num_t>(config::PIN_BUZZER),
       static_cast<gpio_drive_cap_t>(config::BUZZER_DRIVE_CAP));

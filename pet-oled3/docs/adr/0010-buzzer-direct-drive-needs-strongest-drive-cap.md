@@ -96,9 +96,8 @@ void begin() {
 
 - **本决策不改变脚位**。[ADR-0006](0006-hardware-interface-aligned-with-status-oled3.md) 与 [ADR-0007](0007-two-buttons-only-input.md) 的硬件结论全部成立。
 - **本项已从 [`../策划案.md`](../策划案.md) §7 结案**（第 12 项，2026-10-21）。**试玩验证没有取消**——「声音够不够大、好不好听」是主观项，已移入 M4 的听感打磨；本 ADR 定的是**电气余量**。
-- **不要照抄 `status-oled3/src/buzzer.cpp` 的 `begin()`**——那边的 `begin()` 只做 `pinMode()`，**没有设驱动强度**。本项目要加上这一行。
-- **`status-oled3` 也要补这一行**（同一个物理问题：同样的 GPIO 21、同样的蜂鸣器）。但那是另一个项目的改动，**本 ADR 不越权修改它**——已列入汇报事项。
 - **本决策不改变蜂鸣器的「有源型」结论**——仍然只能通断编码、不能出音阶（见 `status-oled3` 的 [ADR-0003](../../../status-oled3/docs/adr/0003-active-buzzer-on-off-encoding.md)）。
+- **`status-oled3` 已同步落地**（2026-10-21，晚于本 ADR 首次落盘）：`status-oled3/src/buzzer.cpp` 的 `begin()` 现在**同样先调 `gpio_set_drive_capability()` 再 `pinMode()`**，`status-oled3/src/main.cpp` 的 boot report **同样用 `gpio_get_drive_capability()` 读回驱动档**并打印 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。两个项目现在是同一套做法，**不再是「照抄 vs 不照抄」的分叉**。
 
 ## 2026-10-21 上板验证（M0）
 
@@ -114,4 +113,4 @@ void begin() {
 
 > 📌 **"代码里写了"不等于"生效了"**——所以 boot report 用 `gpio_get_drive_capability()` **把寄存器读回来**再打印，而不是只打印一个常量。这是本项目验证驱动强度的固定做法。
 >
-> 📌 **`status-oled3` 仍是"只写不读"的状态**——它的 `buzzer::begin()` 没设驱动强度，boot report 也不读回。这是**已知差异**，已在汇报事项里列出（`status-oled3` 属另一项目，本 ADR 不越权修改）。
+> 📌 **`status-oled3` 已于 2026-10-21 补齐**（本 ADR 首次落盘时它还是"只写不读"）：`buzzer::begin()` 现在先设驱动强度，boot report 也读回。**代码已改、已编译通过（RAM 16.3% / Flash 26.9%），但 `status-oled3` 的这版固件尚未上板复测**——它读回时应当看到 `drive cap=3`，这一点留待下次烧录时确认。

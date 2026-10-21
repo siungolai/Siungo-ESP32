@@ -22,6 +22,10 @@ _Avoid_: 切页、下一页、scroll
 内部自带振荡电路、通直流电即发出固定频率声音的蜂鸣器。本项目已实测为此类型（两端通 3.3V 即响），只能通过**通断时长**编码信息，无法通过 PWM 改变音高。接 GPIO 21，见 [ADR-0007](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)。
 _Avoid_: 蜂鸣器、buzzer（未加定语时含义模糊）、有源喇叭
 
+**驱动强度（drive capability）**：
+GPIO 输出级的源/汇电流能力，分四档：`GPIO_DRIVE_CAP_0`（weak）/ `_1`（stronger）/ `_2`（medium，**芯片默认**）/ `_3`（strongest）。**Arduino 的 `pinMode()` 不设它**（只调 `gpio_config()`，不碰 `FUN_DRV`），必须显式 `gpio_set_drive_capability()`。本项目 GPIO 21 的蜂鸣器需要 `_3`（40 mA），因为默认档只有 20 mA 而蜂鸣器典型 20–30 mA。boot report 会把实际档位**读回来**打印。
+_Avoid_: 驱动电流、电流能力（会与 datasheet 的绝对最大电流混淆）
+
 **轻触按钮**：
 按下导通、松开断开的瞬时接触开关。本项目使用两只，分别承担翻页与切换聚焦屏。按钮 A 接 GPIO 6、按钮 B 接 GPIO 7，内部上拉、按下接地为低电平，见 [ADR-0007](docs/adr/0007-gpio-assignment-buttons-and-buzzer.md)。
 _Avoid_: 按键、开关、button（泛指）、键盘

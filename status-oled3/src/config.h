@@ -121,6 +121,33 @@ static const uint32_t BUZZER_BEEP_MS = 80;    // short beep
 static const uint32_t BUZZER_LONG_MS = 400;   // long beep (WiFi lost)
 static const uint32_t BUZZER_GAP_MS = 120;    // pause between repeated beeps
 
+// Drive strength of the buzzer pin. 3 = GPIO_DRIVE_CAP_3 = strongest.
+//
+// The buzzer is wired GPIO21 -> buzzer+ , buzzer- -> GND, so the ESP32
+// SOURCES the current, and the pad's drive capability is what limits it:
+//
+//   ESP32-S3 datasheet v2.2 section 2.3.4 note 5 gives the DEFAULT drive
+//   strength per pin group: GPIO17/18 = 10 mA, GPIO19/20 = 40 mA, all
+//   other pins = 20 mA. GPIO21 is in the "all other" group, so its
+//   default is 20 mA.
+//
+//   The IO electrical characteristics table gives I_OH = 40 mA (VDD 3.3 V,
+//   V_OH >= 2.64 V) when PAD_DRIVER = 3, and I_OL = 28 mA.
+//
+// A typical active buzzer draws 20-30 mA, so the default 20 mA cap is
+// right at the edge: the buzzer either sounds thin or, on a cold morning,
+// does not sound at all.
+//
+// Arduino's pinMode() does NOT do this. In this core __pinMode() only
+// calls gpio_config(); it never touches the pad driver register. The
+// default is GPIO_DRIVE_CAP_2 (medium). So the strength has to be set
+// explicitly, with gpio_set_drive_capability() from the IDF driver header.
+//
+// Same buzzer, same pin, same reasoning as pet-oled3 -- see
+// pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md
+// for the full evidence chain and the NPN fallback.
+static const uint8_t BUZZER_DRIVE_CAP = 3;  // GPIO_DRIVE_CAP_3 = strongest
+
 // ------------------------------------------------------------------ refresh cadence
 // The three screens refresh independently (docs/adr/0001 note), but at two
 // different rates:

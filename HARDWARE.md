@@ -47,7 +47,7 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 | GPIO 19 / GPIO 20 | **禁占** | 原生 USB D+/D-（USB-Serial-JTAG），占用即失去板载串口下载，见 [§1.1](#11-板级参数) |
 | GPIO 4 / GPIO 5 | I2C SCL / SDA（各项目实测） | 本机跑通的 I2C 脚位，见 [§2.3](#23-接线ssd1306-oled)。**`status-oled3` 与 `pet-oled3` 实测接在 4/5 上**（PCA9548A 上游，见 §4.5） |
 | GPIO 6 / GPIO 7 | **同是 `status-oled3` 与 `pet-oled3` 的按钮脚**（2026-10-16 / 2026-10-21 实测）：GPIO 6 = 按钮 A、GPIO 7 = 按钮 B。**另：GPIO 7 与 `dht11-oled` 的 DHT11 数据脚二选一** | GPIO 7 上两者不能同时插——DHT11 模块自带 4.7k~10k 上拉，会与按钮要用的内部上拉并联，见 [§5.3](#53-接线dht11) |
-| GPIO 21 | `status-oled3` 有源蜂鸣器（2026-10-16 实测）；**`pet-oled3`（2026-10-21 起）同接 21 做有源蜂鸣器** | 初版规划 GPIO 12，2026-10-16 按 bench 实测接线订正（**改动理由是与实物一致，不是 GPIO 12 有禁忌**——见下一行）。⚠️ **驱动强度必须提到 `GPIO_DRIVE_CAP_3`**：默认档只有 20 mA，有源蜂鸣器典型 20–30 mA，属临界（见下方驱动能力注记 + [`pet-oled3/docs/adr/0010`](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)） |
+| GPIO 21 | `status-oled3` 有源蜂鸣器（2026-10-16 实测）；**`pet-oled3`（2026-10-21 起）同接 21 做有源蜂鸣器** | 初版规划 GPIO 12，2026-10-16 按 bench 实测接线订正（**改动理由是与实物一致，不是 GPIO 12 有禁忌**——见下一行）。⚠️ **驱动强度必须提到 `GPIO_DRIVE_CAP_3`**：默认档只有 20 mA，有源蜂鸣器典型 20–30 mA，属临界（见下方驱动能力注记 + [`pet-oled3/docs/adr/0010`](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)）。**2026-10-21 起两个项目的固件都已落实**（`status-oled3` 同日补齐，见 §4.8 补充块） |
 | GPIO 8 | `status-oled3` 与 `pet-oled3`（2026-10-21 起）共用：PCA9548A **RESET**（active-low） | 保留硬复位能力；bench 实测 `as found=HIGH`，驱动低再释放不改变结果 |
 | GPIO 12 | **普通 IO**（datasheet v2.2 §2.3.4 列为 P2 = 可自由使用无限制），本机当前无归属 | ⚠️ 2026-10-21 订正：旧版本把它误记为「MTDI strapping 脚」。**datasheet v2.2 实测口径：strapping 脚只有 GPIO 0 / 3 / 45 / 46**（§3 Boot Configurations：GPIO0+GPIO46 = chip boot mode、GPIO45 = VDD_SPI 电压、GPIO46 = ROM 打印、GPIO3 = JTAG 信号源）；**MTDI = GPIO 41**（JTAG 组 GPIO 39/40/41/42 = MTCK/MTDO/MTDI/MTMS）。GPIO 12 复用功能为 FSPIIO6 / SUBSPICLK，非 strapping |
 | GPIO 26–32 | SPI0/1，封装内 Flash/PSRAM 已占 | 规格已核实，不推荐他用 |
@@ -68,6 +68,10 @@ ESP32-S3 共 45 个可用 GPIO（GPIO0–21 + GPIO26–48）。下表是本机�
 > ```
 >
 > `driver/gpio.h` 在 Arduino 工程里可直接 `#include`（`Arduino.h → esp32-hal.h → esp32-hal-dac.h` 已把它带进 include 链），**已用最小 Arduino 工程编译验证可用**。适用于**所有源端驱动大电流的场合**——目前本机只有 GPIO 21 蜂鸣器一处。详见 [`pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md`](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)。
+>
+> 📌 **落地状态（2026-10-21）**：**两个项目都已落实**。`pet-oled3/src/buzzer.cpp` 与 `status-oled3/src/buzzer.cpp` 的 `begin()` 都在 `pinMode()` **之前**调 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`；两个项目的 boot report 都用 `gpio_get_drive_capability()` **把驱动档读回来**打印（`pet-oled3` 已上板读回 = 3；`status-oled3` 已编译通过，**尚未上板复测**）。
+>
+> 📌 **验收做法**：驱动强度这种「写在代码里」的项，**必须读回寄存器才算数**——「代码里写了」不等于「硬件生效了」。boot report 打印寄存器实际值，是这类项的固定验收方式。
 
 ### 1.3 关键板级配置（`platformio.ini`）
 
@@ -596,6 +600,8 @@ A0 = pin22、A1 = pin23、A2 = pin18，各自直连 VCC 或 GND；RESET = pin24�
 > 📌 复现时用到的**新铁律**（源自 `status-oled3` 的 36 小时教训，现已写进 `pet-oled3/src/pca9548a.cpp` 注释）：**换脚位或重新初始化 I2C 必须先 `Wire.end()` 再 `Wire.begin()`**——ESP32 Arduino 框架的 `Wire.cpp` 让第二次 `begin()` 变成 no-op（永远不 `initPins()`），不这样做会得到"改了脚位却还是旧脚在说话"的假测量。
 >
 > 📌 **本节七项已由两个项目各自实测，仓库内不再有「PCA9548A 通路待验证」的事项。** `pet-oled3` 的 [ADR-0006](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md) 已按实现签名订正。
+>
+> 📌 **2026-10-21 补充：GPIO 21 蜂鸣器的驱动强度在两个项目里都已落地。** `status-oled3` 的 `buzzer::begin()` 原来只做 `pinMode()`（**不设驱动强度**，见 §1.2 尾注），2026-10-21 已补上 `gpio_set_drive_capability(GPIO_NUM_21, GPIO_DRIVE_CAP_3)`（**在 `pinMode()` 之前**），boot report 也改为用 `gpio_get_drive_capability()` **把驱动档读回来**打印 `buzzer pin : GPIO21 drive cap=3 (want 3) readback ok`。`status-oled3` 这版固件**已编译通过但尚未上板复测**，下次烧录时应看到该行。
 
 > 📌 **2026-10-21 订正**：本节标题已从「待本机验证（bringup 必做）」改为「已验证（2026-10-17）」；原第 575 行的待办（"完成后回写本节"）**已执行**——[§4.7](#47-驱动接口已实现2026-10-17) 的规划接口已替换为实现签名。
 > `pet-oled3` 的 M0 **已于 2026-10-21 完成复现**（结论一致，见上方复现确认块），不必重查地址、线序、上拉、模块好坏。见 [`pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md`](pet-oled3/docs/adr/0006-hardware-interface-aligned-with-status-oled3.md)。
