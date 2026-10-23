@@ -5,8 +5,8 @@
  * reads a FLAT object of string and number values and nothing else. No
  * nested objects, no arrays, no traversal, no serialization. Both data
  * sources in this project are flat by design:
- *   - https://www.siungo.top/status/snapshot.json (docs/adr/0008)
- *   - https://www.siungo.top/status/mailbox.json (docs/adr/0008)
+ *   - https://<数据源主机>/status/snapshot.json (docs/adr/0008)
+ *   - https://<数据源主机>/status/mailbox.json (docs/adr/0008)
  * If a future endpoint needs nesting, flatten the SERVER output first --
  * keeping a parser in firmware is the more expensive side (ADR-0010 notes).
  *

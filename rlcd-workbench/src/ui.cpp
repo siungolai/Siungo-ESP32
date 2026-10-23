@@ -18,8 +18,11 @@ constexpr uint8_t INK = 1;
 constexpr uint8_t PAPER = 0;
 
 const uint8_t *F_CN = u8g2_font_wqy12_t_gb2312;
-const uint8_t *F_BIG = u8g2_font_logisoso62_tn;  // HH:MM，实测最宽 179 px
-const uint8_t *F_SEC = u8g2_font_logisoso20_tn;  // 秒，实测 27 px
+// HH:MM 用 58 不用 62：右上板实测，62 的 "10:22" 是 192 px —— 正好等于左栏内宽，
+// 一点空隙都没有（离线那把尺子当年量成 179，是偏小的）。58 实测 177 px，
+// 左右各留 7.5 px，才是「横向占满 + 留一点点空隙」。
+const uint8_t *F_BIG = u8g2_font_logisoso58_tn;
+const uint8_t *F_SEC = u8g2_font_logisoso20_tn;  // 秒，实测 26~28 px
 const uint8_t *F_MID = u8g2_font_logisoso32_tf;  // 温湿度，带 °C %
 const uint8_t *F_VAL = u8g2_font_logisoso28_tf;  // 面板二数值
 
@@ -178,6 +181,34 @@ void drawFooter(U8G2 *g, const AppState &s) {
   char buf[16];
   snprintf(buf, sizeof(buf), "%d/2", s.panel + 1);
   textRight(g, cfg::kMarginR, cfg::kContentBottom + 16, buf);
+
+  // 中段只在「需要解释」的时候才出声：没数据 / 停更 / 断网。
+  // 正常时页尾保持安静 —— 一个每秒都在变的页脚会让人以为出了什么事。
+  // 龄期用设备单调时钟算（ADR-0009），不用快照里的 generated_at。
+  if (s.panel != 1) {
+    return;
+  }
+  const char *note = nullptr;
+  if (!s.serverHasData) {
+    note = "无数据";
+  } else if (s.wifi != WIFI_ON) {
+    note = "离线";
+  } else if (s.serverStale) {
+    note = "停更";
+  }
+  if (note == nullptr) {
+    return;
+  }
+  char mid[24];
+  const uint32_t a = s.serverAgeSec;
+  if (!s.serverHasData) {
+    snprintf(mid, sizeof(mid), "%s", note);
+  } else if (a < 60) {
+    snprintf(mid, sizeof(mid), "%s %us", note, (unsigned)a);
+  } else {
+    snprintf(mid, sizeof(mid), "%s %um", note, (unsigned)(a / 60u));
+  }
+  textCenter(g, cfg::kLcdWidth / 2, cfg::kContentBottom + 16, mid);
 }
 
 // ---- 面板一：本地 ----
@@ -284,9 +315,17 @@ void drawLocal(U8G2 *g, const AppState &s) {
   textCenter(g, 4 + 42, 212, "占位");
 
   // 温湿度右对齐到 196，只有数字和单位，无中文标签
-  g->setFont(F_MID);
+  //
+  // 注意左边那个宠物占位框：它的右边缘在 x=88，温度串一旦超过 104 px 就会压上去。
+  // 上板实测 "24.5°C" 是 103 px（刚好挤进），但 "-12.3°C" 是 125 px —— 冬天或者
+  // 把板子放到空调出风口就会撞框。所以先量宽度再选字号，别赌读数永远正数。
   snprintf(buf, sizeof(buf), "%.1f°C", s.tempC);
+  g->setFont(F_MID);
+  if ((int)g->getUTF8Width(buf) > 104) {
+    g->setFont(u8g2_font_logisoso24_tf);
+  }
   textRight(g, 196, 208, buf);
+  g->setFont(F_MID);
   snprintf(buf, sizeof(buf), "%.0f%%", s.humi);
   textRight(g, 196, 252, buf);
 
@@ -403,6 +442,11 @@ void touchFonts() {
   (void)p;
 }
 
+const uint8_t *fontCn() { return F_CN; }
+const uint8_t *fontBig() { return F_BIG; }
+const uint8_t *fontSec() { return F_SEC; }
+const uint8_t *fontMid() { return F_MID; }
+
 void drawFrame(U8G2 *g, const AppState &s, bool showHeaderTime) {
   g->clearBuffer();
   g->setDrawColor(INK);
@@ -428,11 +472,15 @@ void drawAbout(U8G2 *g, const AppState &s) {
   g->setDrawColor(INK);
 
   g->setFont(F_CN);
+  // 数据源主机来自 src/secrets.h，所以这一行必须运行时拼 —— 不能写成字符串字面量，
+  // 否则真实域名又回到公开仓库里了。
+  static char s_dataRow[48];
+  snprintf(s_dataRow, sizeof(s_dataRow), "数据源  %s/status/", cfg::kDataHost);
   const char *kRows[] = {
       "目标板  Waveshare ESP32-S3-RLCD-4.2",
       "屏幕    4.2 寸 400x300 全反射黑白",
       "时间源  PCF85063 RTC + NTP 校正",
-      "数据源  www.siungo.top/status/",
+      s_dataRow,
       "密钥    X-Monitor-Key（src/secrets.h）",
   };
   int y = 44;

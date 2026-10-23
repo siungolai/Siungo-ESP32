@@ -185,13 +185,27 @@ void begin() {
 
 void requestRefresh() { g_force = true; }
 
+namespace {
+// 当前轮询间隔。成功时恒为 kSnapshotPollMs，失败后按 15/30/60/120 阶梯拉长。
+uint32_t g_pollIntervalMs = cfg::kSnapshotPollMs;
+uint32_t g_failStreak = 0;
+
+uint32_t nextPollInterval() {
+  uint32_t ms = cfg::kSnapshotPollMs;
+  for (uint32_t i = 0; i < g_failStreak && ms < cfg::kSnapshotBackoffMaxMs; ++i) {
+    ms *= 2;
+  }
+  return ms > cfg::kSnapshotBackoffMaxMs ? cfg::kSnapshotBackoffMaxMs : ms;
+}
+}  // namespace
+
 void tick() {
   if (netwifi::state() != netwifi::State::Connected) {
     return;  // 没网不发请求，避免每次 tick 都白连一次
   }
 
   const uint32_t now = millis();
-  if (!g_force && (now - g_lastAttemptMs) < cfg::kSnapshotPollMs) {
+  if (!g_force && (now - g_lastAttemptMs) < g_pollIntervalMs) {
     return;
   }
   g_force = false;
@@ -200,8 +214,18 @@ void tick() {
   if (!fetchOnce()) {
     // 失败不清数据：屏幕上宁可显示「60 秒前的读数 + 离线标记」，
     // 也不要一片空白 —— 空白分不清「服务器挂了」和「设备没联网」。
+    ++g_failStreak;
+    g_pollIntervalMs = nextPollInterval();
+    logLine("[snap] fail #%lu (http=%d), next try in %lu ms", (unsigned long)g_failStreak,
+            g_data.lastHttpCode, (unsigned long)g_pollIntervalMs);
     return;
   }
+  if (g_failStreak > 0) {
+    logLine("[snap] recovered after %lu fail(s), back to %lu ms",
+            (unsigned long)g_failStreak, (unsigned long)cfg::kSnapshotPollMs);
+    g_failStreak = 0;
+  }
+  g_pollIntervalMs = cfg::kSnapshotPollMs;
 
   char ps[8];
   const Probe pp[6] = {g_data.svcWeb,  g_data.svcSelect, g_data.svcWb,

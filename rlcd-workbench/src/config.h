@@ -108,12 +108,38 @@ constexpr int64_t kTimeSanityEpoch = 1700000000;   // 2023-11-15，低于它说�
 // ---- 服务器快照 ----
 // 契约冻结在 status-oled3/docs/adr/0012；本项目议定扩到 22 字段（加 svc_select /
 // svc_wb / svc_ma12，见 ADR-0014）。设备端按字段名取值，不建偏移表。
-constexpr const char *kDataHost = "www.siungo.top";
+// 真实主机名是**资产**，不该跟着代码进公开仓库：六个探针里有一个是第三方主机
+// 加非标端口，写进来等于替别人广播「这个地址开放 11948」。所以这里只留占位符，
+// 真值放 gitignored 的 src/secrets.h。
+// 没有 secrets.h 也能编译（走占位符）—— clone 下来想先看屏幕点亮，不该被凭据卡住。
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef RLCD_DATA_HOST
+#define RLCD_DATA_HOST "example.com"
+#endif
+#ifndef RLCD_PROBE_WEB
+#define RLCD_PROBE_WEB "www.example.com"
+#endif
+#ifndef RLCD_PROBE_SELECT
+#define RLCD_PROBE_SELECT "select.example.com"
+#endif
+#ifndef RLCD_PROBE_WB
+#define RLCD_PROBE_WB "wb.example.com"
+#endif
+#ifndef RLCD_PROBE_MA12
+#define RLCD_PROBE_MA12 "your-tcp-host.example:0000"
+#endif
+
+constexpr const char *kDataHost = RLCD_DATA_HOST;
 constexpr const char *kSnapshotPath = "/status/snapshot.json";
 constexpr const char *kMonitorKeyHeader = "X-Monitor-Key";
 
 constexpr uint32_t kSnapshotPollMs = 15000;   // 轮询间隔
 constexpr uint32_t kSnapshotStaleMs = 60000;  // 超过这么久没更新就算「停更」
+// 失败退避：15 -> 30 -> 60 -> 120 s 封顶。服务器挂了的时候不该每 15 秒去敲
+// 一次门 —— 既费电，又把日志刷成一片「fail」。
+constexpr uint32_t kSnapshotBackoffMaxMs = 120000;
 constexpr uint32_t kHttpTimeoutMs = 8000;
 constexpr uint32_t kHttpResponseMax = 1024;   // 与 status-oled3 一致；超了就是契约坏了
 

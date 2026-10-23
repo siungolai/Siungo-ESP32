@@ -1,6 +1,6 @@
 // rlcd-workbench / 服务器指标快照
 //
-// 数据源是 status-oled3 早就跑着的 https://www.siungo.top/status/snapshot.json
+// 数据源是 status-oled3 早就跑着的 https://<数据源主机>/status/snapshot.json
 // （契约见 status-oled3/docs/adr/0012）。本项目不改它的语义，只在本期议定把
 // 字段数从 19 扩到 22（加 svc_select / svc_wb / svc_ma12，见 ADR-0014）。
 //

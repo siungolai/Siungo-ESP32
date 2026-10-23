@@ -104,4 +104,11 @@ void secondsRect(int *x, int *y, int *w, int *h);
 // section 回收把没被直接点名的字库丢掉。
 void touchFonts();
 
+// 供字宽自检用：返回 UI 真正在用的那几张字库。自检和界面共用一个来源，
+// 免得改了 ui.cpp 的字库之后策划案里的宽度数字悄悄失效。
+const uint8_t *fontCn();
+const uint8_t *fontBig();
+const uint8_t *fontSec();
+const uint8_t *fontMid();
+
 }  // namespace ui

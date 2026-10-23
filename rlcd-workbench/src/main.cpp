@@ -5,6 +5,7 @@
 // 本文件的职责仍是：状态机（面板 / 关于页 / 对比度）、按键分发、刷新与省电策略。
 
 #include <Arduino.h>
+#include <esp_system.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -39,6 +40,7 @@ uint32_t g_lastBatteryMs = 0;
 uint32_t g_lastWifiMs = 0;
 bool g_lpm = false;
 bool g_dirty = true;
+bool g_logNextPaint = false;
 bool g_sensorOk = false;
 bool g_batteryOk = false;
 bool g_dropTestDone = false;
@@ -349,10 +351,17 @@ bool syncServerToState() {
   const snapshot::Data &d = snapshot::data();
   bool changed = false;
 
-  // 新鲜度先算：即使数值没变，龄期跨过一个整秒也可能要重画页尾。
+  // 新鲜度先算：只有**停更**时龄期才会画到屏上（页尾「离线 42 s」）。
+  // 新鲜的时候必须把它钉成 0 —— 否则 ageSec 每秒 +1，这个函数就会每秒
+  // 返回 true，面板二每秒从 LPM 醒一次（每次先切 HPM 再等 100 ms），
+  // 省电等于完全没做。停更后按 5 秒一档，同理不为它付 1 Hz 的代价。
   const bool hasData = d.valid;
-  const uint32_t ageSec = hasData ? snapshot::ageMs() / 1000 : 0;
   const bool staleNow = snapshot::stale();
+  // 页尾只在「停更」或「断网」时才把龄期显示出来，所以也只在那个时候让它跳动。
+  // 断网要单独算：WiFi 刚掉时数据可能还没到 60 s 的停更阈值，那时候屏上仍然
+  // 应该立刻出现「离线」，而不是等龄期爬过 60 秒才提示。
+  const bool showAge = hasData && (staleNow || g_state.wifi != WIFI_ON);
+  const uint32_t ageSec = showAge ? (snapshot::ageMs() / 5000u) * 5u : 0;
   if (g_state.serverHasData != hasData || g_state.serverStale != staleNow ||
       g_state.serverAgeSec != ageSec) {
     g_state.serverHasData = hasData;
@@ -501,12 +510,13 @@ void fillFakeData() {
   // 面板二在拿到第一份快照前是「还不知道」，不是「全是 0」也不是「全是叉」。
   // 所以这里只摆好六行的标签，状态统一 Unknown，known 位一个都不置。
   g_state.probeCount = 6;
-  g_state.probes[0] = {"www.siungo.top", PROBE_UNKNOWN};
-  g_state.probes[1] = {"select.siungo.top", PROBE_UNKNOWN};
-  g_state.probes[2] = {"wb.siungo.top", PROBE_UNKNOWN};
+  // 前三个与最后一个标签来自 src/secrets.h（不入库），代码里只有占位符。
+  g_state.probes[0] = {RLCD_PROBE_WEB, PROBE_UNKNOWN};
+  g_state.probes[1] = {RLCD_PROBE_SELECT, PROBE_UNKNOWN};
+  g_state.probes[2] = {RLCD_PROBE_WB, PROBE_UNKNOWN};
   g_state.probes[3] = {"api/photos", PROBE_UNKNOWN};
   g_state.probes[4] = {"api/health", PROBE_UNKNOWN};
-  g_state.probes[5] = {"<tcp-host>:<port>", PROBE_UNKNOWN};
+  g_state.probes[5] = {RLCD_PROBE_MA12, PROBE_UNKNOWN};
   g_state.known = 0;
   g_state.serverHasData = false;
   g_state.serverStale = false;
@@ -531,7 +541,16 @@ void paint() {
   if (g_contrastHintUntil != 0 && (int32_t)(millis() - g_contrastHintUntil) < 0) {
     ui::drawContrastHint(g, g_contrastIdx, cfg::kContrastCount);
   }
+  const uint32_t t0 = micros();
   g_lcd.refreshAll();
+  const uint32_t flushUs = micros() - t0;
+  if (g_logNextPaint) {
+    // 按键触发的那一帧单独打一行：没有这行，「按键有效但屏没变」和
+    // 「按键根本没进来」在串口上长得一模一样。
+    g_logNextPaint = false;
+    logLine("[paint] panel=%d about=%d lpm=%d flush=%luus", g_state.panel, g_state.about ? 1 : 0,
+            g_lpm ? 1 : 0, (unsigned long)flushUs);
+  }
   g_dirty = false;
 }
 
@@ -580,6 +599,7 @@ void handleKey(Gesture gs) {
     default:
       break;
   }
+  g_logNextPaint = true;
   g_dirty = true;
 }
 
@@ -606,12 +626,95 @@ void handleBoot(Gesture gs) {
   }
 }
 
+// 字宽自检：把策划案 §4.3 里那几个「实测值」在**真机上**再量一遍。
+// 离线那把尺子是我自己照着 u8g2_font.c 重写的解析器；这里用的是 u8g2 自己的
+// getUTF8Width()，同一串文字两边算出同一个数，才说明离线量出来的版面能信。
+// 期望值全部来自 docs/策划案.md §4.3（以及 ADR-0016 的字体表）。
+void fontSelfTest() {
+  U8G2 *g = g_lcd.g();
+  if (g == nullptr) {
+    return;
+  }
+  struct Case {
+    const uint8_t *font;
+    const char *text;
+    int expect;
+    const char *name;
+  };
+  // 中文用转义写，避免源文件编码在别处被转换后和字库对不上。
+  static const char kWeek[] = "\xE4\xB8\x80\xE4\xBA\x8C\xE4\xB8\x89\xE5\x9B\x9B\xE4\xBA\x94\xE5\x85\xAD\xE6\x97\xA5";
+  static const char kTodo[] = "\xE5\xBE\x85\xE5\x8A\x9E";
+  const Case cases[] = {
+      {ui::fontBig(), "10:22", 177, "logi58 10:22"},
+      {u8g2_font_logisoso62_tn, "10:22", 192, "logi62 10:22(=inner)"},
+      {u8g2_font_logisoso62_tn, "00:00:02", 286, "logi62 HH:MM:SS"},
+      {ui::fontSec(), "02", 28, "logi20 02"},
+      {ui::fontSec(), "31", 26, "logi20 31"},
+      {ui::fontMid(), "24.5\xC2\xB0" "C", 103, "logi32 24.5C"},
+      {ui::fontMid(), "-12.3\xC2\xB0" "C", 125, "logi32 -12.3C"},
+      {ui::fontMid(), "48%", 60, "logi32 48%"},
+      {ui::fontCn(), kWeek, 81, "wqy12 weekday"},
+      {ui::fontCn(), kTodo, 23, "wqy12 todo"},
+  };
+  int fail = 0;
+  for (const Case &c : cases) {
+    g->setFont(c.font);
+    const int w = (int)g->getUTF8Width(c.text);
+    const bool ok = (w == c.expect);
+    if (!ok) {
+      ++fail;
+    }
+    logLine("[font-test] %-16s got=%3d expect=%3d %s", c.name, w, c.expect, ok ? "OK" : "MISMATCH");
+  }
+  logLine("[font-test] result = %s (%d fail)", fail == 0 ? "OK" : "FAIL", fail);
+
+  // 候选表：左栏内宽只有 192 px，时间这一行到底能放多大，只能上板量。
+  // 离线那把尺子（自己照 u8g2_font.c 重写的解析器）在 ASCII 上系统性偏小，
+  // CJK 却是准的 —— 所以这组数字必须由设备自己给。
+  const struct {
+    const uint8_t *font;
+    const char *tag;
+  } clockFonts[] = {
+      {u8g2_font_logisoso62_tn, "logi62"},
+      {u8g2_font_logisoso58_tn, "logi58"},
+      {u8g2_font_logisoso54_tn, "logi54"},
+      {u8g2_font_logisoso50_tn, "logi50"},
+      {u8g2_font_logisoso46_tn, "logi46"},
+  };
+  for (const auto &c : clockFonts) {
+    g->setFont(c.font);
+    const int wHm = (int)g->getUTF8Width("10:22");
+    const int wS = (int)g->getUTF8Width("31");
+    logLine("[font-cand] %s HH:MM=%3d sec20=%3d (inner=192)", c.tag, wHm, wS);
+  }
+}
+
+// 上一次复位的原因。板子会自己重启的时候，这一行是唯一不用抓崩溃现场就能
+// 分辨「软件崩了 / 电源掉压 / 看门狗」的证据 —— 崩溃栈走的是 UART0，
+// 插着 USB 只看 COM6 是看不到的。
+const char *resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:  return "poweron";
+    case ESP_RST_EXT:      return "external";
+    case ESP_RST_SW:       return "software";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:  return "int_wdt";
+    case ESP_RST_TASK_WDT: return "task_wdt";
+    case ESP_RST_WDT:      return "wdt";
+    case ESP_RST_DEEPSLEEP:return "deepsleep";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_SDIO:     return "sdio";
+    default:               return "unknown";
+  }
+}
+
 void printBootReport() {
   Serial.println();
   Serial.println("========================================");
   Serial.println("project : rlcd-workbench");
   Serial.println("stage   : M2 boot (i2c + shtc3 + battery + wifi)");
   Serial.println("----------------------------------------");
+  Serial.printf("reset   : %s\n", resetReasonName(esp_reset_reason()));
   Serial.printf("chip    : %s rev %d\n", ESP.getChipModel(), (int)ESP.getChipRevision());
   Serial.printf("cores   : %d @ %d MHz\n", (int)ESP.getChipCores(), (int)getCpuFrequencyMhz());
   Serial.printf("sdk     : %s\n", ESP.getSdkVersion());
@@ -644,6 +747,20 @@ void printBootReport() {
 
 void setup() {
   Serial.begin(115200);
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  // USB Serial/JTAG 的写是**阻塞**的，而且默认放得比想象中宽。
+  // 框架源码（cores/esp32/HWCDC.cpp）：
+  //   :105  static uint32_t tx_timeout_ms = 100;                ← 默认 100 ms
+  //   :590  xRingbufferSend(tx_ring_buf, ..., tx_timeout_ms)    ← 按这个值等
+  //   :582  const uint32_t max_consec_timeouts = 20;            ← 一次 write 最多连等 20 次
+  //   :646  while (connected && tries && uxItemsWaiting)        ← 拆包场景再等一遍
+  // 所以主机那头一开始不读（串口工具退出、进程被杀、线松了但没掉枚举），
+  // 缓冲区写满后 **一次 println 最多能卡 20 × 100 ms = 2 秒**。
+  // 主循环每秒打一两行日志时，它永远追不上 —— 表现就是整块屏幕冻住、
+  // 按键全无反应，跟死机一模一样，拔插 USB 或者按复位又好了。
+  // 设成 0：缓冲区满就丢字节，绝不等待。日志宁可少，也不能拖死主循环。
+  Serial.setTxTimeoutMs(0);
+#endif
   delay(300);
 
   input::begin();
@@ -659,6 +776,7 @@ void setup() {
 
   fillFakeData();
   clockSelfTest();
+  fontSelfTest();  // 字库已经 init 过，getUTF8Width 从这里开始才可用
 
   // ---- M2 第 1+2 步：I2C 总线 + SHTC3 ----
   // 总线先建，扫描一次把整条线上的从设备列出来（这块板上应有 0x18 / 0x40 / 0x51 / 0x70）。
@@ -761,16 +879,26 @@ void loop() {
     const int prevMinute = workclock::now().minute;
     workclock::advance(delta);
     syncClockToState();
+    const bool minuteTicked = (workclock::now().minute != prevMinute);
 
     // 每分钟一行日志：验「分有没有进位」不用盯着屏幕等一分钟。
-    if (workclock::now().minute != prevMinute) {
+    if (minuteTicked) {
       const tu::DT &t = workclock::now();
       logLine("[clock] 20%02d-%02d-%02d %02d:%02d:%02d", t.year % 100, t.month, t.day, t.hour,
               t.minute, t.second);
     }
 
-    if (!g_state.about && g_state.panel == 0 && !g_lpm) {
-      g_dirty = true;
+    // 面板一有独立的大时钟，秒针必须每秒跳；其余视图的页首只画到分钟，
+    // 一分钟重画一次就够 —— 在 LPM 里每次重画都要先切 HPM 再等 100 ms，
+    // 每秒重画等于让面板二的省电完全失效。
+    if (!g_state.about) {
+      if (g_state.panel == 0) {
+        if (!g_lpm) {
+          g_dirty = true;
+        }
+      } else if (minuteTicked) {
+        g_dirty = true;
+      }
     }
   }
 
