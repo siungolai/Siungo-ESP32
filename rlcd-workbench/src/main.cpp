@@ -11,12 +11,14 @@
 #include <cstring>
 
 #include "clock.h"
+#include "battery.h"
 #include "config.h"
 #include "i2c.h"
 #include "input.h"
 #include "rlcd.h"
 #include "shtc3.h"
 #include "ui.h"
+#include "net_wifi.h"
 
 namespace {
 
@@ -29,9 +31,13 @@ uint32_t g_bootHintUntil = 0;
 uint32_t g_lastActivityMs = 0;
 uint32_t g_lastSecond = 0;
 uint32_t g_lastSensorMs = 0;
+uint32_t g_lastBatteryMs = 0;
+uint32_t g_lastWifiMs = 0;
 bool g_lpm = false;
 bool g_dirty = true;
 bool g_sensorOk = false;
+bool g_batteryOk = false;
+bool g_dropTestDone = false;
 
 void logLine(const char *fmt, ...) {
   char buf[128];
@@ -185,6 +191,62 @@ bool readSensors(bool verbose) {
   return true;
 }
 
+// 采一次电池电压并写进界面状态。
+//
+// 与温湿度同样的取舍：读失败就保持上一次的百分比，不把图标打成空格 ——
+// 「电量未知」和「电量为 0」在屏幕上长得一样，但那两件事差得远。
+bool readBattery(bool verbose) {
+  if (!battery::ready()) {
+    return false;
+  }
+  battery::Sample s;
+  if (!battery::read(&s)) {
+    if (verbose) {
+      logLine("[bat] read failed");
+    }
+    return false;
+  }
+  // 只有百分比真的变了才置脏。
+  //
+  // 电压在几毫伏内晃是常态，而「置脏」在面板二上意味着从 LPM 醒来重画一帧
+  // （refreshAll 会先切 HPM 再等 100 ms），为一次没变过的读数付这个代价不值得。
+  const int prevPct = g_state.batteryPct;
+  g_state.batteryPct = s.pct;
+  g_batteryOk = true;
+  if (prevPct != s.pct) {
+    g_dirty = true;
+  }
+  if (verbose) {
+    logLine("[bat] raw=%d pin=%dmV pack=%.3fV -> %d%%", s.raw, s.pinMv, (double)s.packV, s.pct);
+  }
+  return true;
+}
+
+// 把 netwifi 的三态投影到界面状态；变了才置脏。
+//
+// 映射刻意只有一对三：Connected -> 满格、Connecting -> 半格、NotConfigured -> 叉。
+// 没有「断开」这个独立显示态 —— 只要还在重连，屏幕上就该是半格。
+bool syncWifiToState() {
+  WifiState want = WIFI_CONNECTING;
+  switch (netwifi::state()) {
+    case netwifi::State::Connected:
+      want = WIFI_ON;
+      break;
+    case netwifi::State::NotConfigured:
+      want = WIFI_OFF;
+      break;
+    default:
+      want = WIFI_CONNECTING;
+      break;
+  }
+  if (g_state.wifi == want) {
+    return false;
+  }
+  g_state.wifi = want;
+  g_dirty = true;
+  return true;
+}
+
 // 自发热诊断：停掉一切重绘，静置 kThermalProbeMs，定期记录两种温度。
 //
 // 为什么要做这件事：SHTC3 读到 35 °C，而 SoC 结温 36 °C 也跟着走 —— 两者贴得
@@ -238,7 +300,7 @@ void fillFakeData() {
   // 温湿度先给一组占位值，shtc3 第一次读数成功就被覆盖。
   // 传感器读不到时屏幕上就是这组数，串口会有 [shtc3] MISSING 或 read failed。
   g_state.batteryPct = 87;
-  g_state.wifi = WIFI_ON;
+  g_state.wifi = WIFI_CONNECTING;
   g_state.todoTotal = 6;
   g_state.todoDone = 0;
 
@@ -361,7 +423,7 @@ void printBootReport() {
   Serial.println();
   Serial.println("========================================");
   Serial.println("project : rlcd-workbench");
-  Serial.println("stage   : M2 boot (i2c + shtc3)");
+  Serial.println("stage   : M2 boot (i2c + shtc3 + battery + wifi)");
   Serial.println("----------------------------------------");
   Serial.printf("chip    : %s rev %d\n", ESP.getChipModel(), (int)ESP.getChipRevision());
   Serial.printf("cores   : %d @ %d MHz\n", (int)ESP.getChipCores(), (int)getCpuFrequencyMhz());
@@ -378,6 +440,9 @@ void printBootReport() {
                 (unsigned long)cfg::kI2cClockHz, i2cbus::ready() ? "up" : "DOWN");
   Serial.printf("shtc3   : %s, id=0x%04X\n", shtc3::ready() ? "ready" : "MISSING",
                 (unsigned)shtc3::sensorId());
+  Serial.printf("battery : %s, %d%%\n", battery::ready() ? "ready" : "MISSING",
+                g_state.batteryPct);
+  Serial.printf("wifi    : %s, ssid=%s\n", netwifi::stateName(), netwifi::ssid());
   Serial.printf("contrast: level %u/%u (%u)\n", (unsigned)(g_contrastIdx + 1),
                 (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[g_contrastIdx]);
   Serial.println("========================================");
@@ -420,6 +485,28 @@ void setup() {
   }
   readSensors(false);
   g_lastSensorMs = millis();
+
+  // ---- M2 第 3 步：电量 ADC ----
+  // 走 IDF 的 adc_oneshot + 曲线拟合校准，不用 analogRead()：后者拿不到校准值，
+  // 毫伏数系统偏低的量足以把「满电」显示成「八成」。
+  if (battery::begin()) {
+    readBattery(false);
+    // 连读三次打出来：这块板的分压点并了两颗 100 nF，正常应该稳定在几毫伏内。
+    // 要是三次差几十毫伏，说明是开关电源纹波，界面上得再加迟滞。
+    for (int i = 0; i < 3; ++i) {
+      readBattery(true);
+      delay(50);
+    }
+  } else {
+    logLine("[bat] init FAILED");
+  }
+  g_lastBatteryMs = millis();
+
+  // ---- M2 第 4 步：WiFi ----
+  // begin() 只发起第一次连接，不等结果 —— 连上要好几秒，不能在这里阻塞。
+  netwifi::begin();
+  g_lastWifiMs = millis();
+  syncWifiToState();
 
   printBootReport();
 
@@ -495,6 +582,27 @@ void loop() {
   if (millis() - g_lastSensorMs >= cfg::kSensorPollMs) {
     g_lastSensorMs = millis();
     readSensors(true);
+  }
+
+  // 电量 60 秒一次。只打日志，不无条件置脏 —— 电压在几毫伏内晃是常态，
+  // 每分钟为它重画一帧不值当；百分比真变了 readBattery() 自己会置脏。
+  if (millis() - g_lastBatteryMs >= cfg::kBatteryPollMs) {
+    g_lastBatteryMs = millis();
+    readBattery(true);
+  }
+
+  // WiFi 状态机 100 ms 走一格。它内部有 15 s 尝试超时与 5/10/20/40/60 s 退避，
+  // 调得太稀会让退避计时失真；调得太密则是无意义地查 WiFi.status()。
+  if (millis() - g_lastWifiMs >= cfg::kWifiTickMs) {
+    g_lastWifiMs = millis();
+    netwifi::tick();
+    syncWifiToState();  // 变了才置脏
+  }
+
+  // bringup 开关：验证重连链用，正常固件 kWifiDropTestMs = 0 永不触发。
+  if (cfg::kWifiDropTestMs > 0 && !g_dropTestDone && millis() >= cfg::kWifiDropTestMs) {
+    g_dropTestDone = true;
+    netwifi::debugDropLink();
   }
 
   if (g_dirty) {

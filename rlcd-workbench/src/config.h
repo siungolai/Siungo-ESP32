@@ -69,8 +69,25 @@ constexpr bool kThermalProbe = false;
 constexpr uint32_t kThermalProbeMs = 180000;
 constexpr uint32_t kThermalProbePeriodMs = 10000;
 
-// ---- 电池采样（M2 才用）----
+// ---- 电池采样 ----
+// VBAT -- R21 200K --+-- R23 100K -- GND，采样点接 GPIO4（ADC1_CH3）。
+// 分压比 100/(200+100) = 1/3，所以还原时乘 3。
 constexpr int kBatAdc = 4;
+constexpr float kBatteryDivider = 3.0f;
+constexpr uint32_t kBatteryPollMs = 60000;
+
+// ---- WiFi ----
+// 凭据写在 gitignored 的 src/secrets.h，不在这里。
+constexpr uint32_t kWifiTickMs = 100;              // 状态机轮询间隔
+constexpr uint32_t kWifiAttemptTimeoutMs = 15000;  // 单次连接尝试多久算超时
+constexpr uint32_t kWifiBackoffMinMs = 5000;       // 第一次重试等 5 s
+constexpr uint32_t kWifiBackoffMaxMs = 60000;      // 退避上限 60 s（5/10/20/40/60）
+
+// bringup 专用：非 0 时在开机 N 毫秒处主动断开一次，用来验证
+// Trying -> Waiting -> Trying 这条重连链。正常固件保持 0。
+// 为什么要留这个开关：拔路由器是最真实的验证，但不可能每次都去拔；
+// 软件断开走的是同一段状态机代码，能把「掉线后被重连逻辑捞回来」这条路径跑通。
+constexpr uint32_t kWifiDropTestMs = 0;
 
 // ---- 时序 ----
 constexpr uint32_t kBootKeyIgnoreMs = 1000;  // 上电后丢弃 BOOT 事件的窗口
