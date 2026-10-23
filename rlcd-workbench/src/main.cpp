@@ -21,7 +21,9 @@
 #include "snapshot.h"
 #include "timesync.h"
 #include "timeutil.h"
+#include "ai.h"
 #include "todo.h"
+#include "version.h"
 #include "tz.h"
 #include "ui.h"
 #include "net_wifi.h"
@@ -39,6 +41,8 @@ uint32_t g_lastSecond = 0;
 uint32_t g_lastSensorMs = 0;
 uint32_t g_lastBatteryMs = 0;
 uint32_t g_lastWifiMs = 0;
+uint32_t g_heartbeatMs = 0;   // 60 s 心跳
+uint32_t g_heapMin = 0;        // 启动以来最小可用堆，A4b 看漂移
 bool g_lpm = false;
 bool g_dirty = true;
 bool g_logNextPaint = false;
@@ -815,8 +819,9 @@ const char *resetReasonName(esp_reset_reason_t r) {
 void printBootReport() {
   Serial.println();
   Serial.println("========================================");
-  Serial.println("project : rlcd-workbench");
-  Serial.println("stage   : M3 boot (i2c + shtc3 + battery + wifi + server + todo)");
+  Serial.printf("project : rlcd-workbench %s (%s)\n", ver::kVersion, ver::kDate);
+  Serial.println("stage   : M4 boot (i2c + shtc3 + battery + wifi + server + todo)");
+  Serial.printf("uptime  : %lu s since boot\n", (unsigned long)(millis() / 1000));
   Serial.println("----------------------------------------");
   Serial.printf("reset   : %s\n", resetReasonName(esp_reset_reason()));
   Serial.printf("chip    : %s rev %d\n", ESP.getChipModel(), (int)ESP.getChipRevision());
@@ -942,6 +947,8 @@ void setup() {
   todo::begin();
   syncTodoToState();  // 首帧就是「还没拿到」，不是先画一拍假数据
 
+  g_heartbeatMs = millis();
+  g_heapMin = ESP.getFreeHeap();
   printBootReport();
 
   const uint32_t t0 = millis();
@@ -1062,6 +1069,25 @@ void loop() {
     g_lastTimeSource = timesync::source();
     syncClockToState();
     g_dirty = true;
+  }
+
+  // 心跳：60 秒一行，事件行（按键 / WiFi / 快照 / 待办 / 停更）照旧立即输出。
+  //
+  // A4 要求"每 60 秒一行心跳"。它不只是"证明还活着" —— 长时间通电时，
+  // 这一行是唯一能事后回答"堆有没有在漏、WiFi 有没有掉过、轮询还在不在跑"的证据。
+  // g_heapMin 记的是启动以来最小值：只看瞬时值分不清"一直很少"和"刚刚掉了"。
+  if (millis() - g_heartbeatMs >= 60000) {   // 无符号减法，millis 回绕也安全
+    g_heartbeatMs = millis();
+    const uint32_t heap = ESP.getFreeHeap();
+    if (g_heapMin == 0 || heap < g_heapMin) {
+      g_heapMin = heap;
+    }
+    const snapshot::Data &sd = snapshot::data();
+    const todo::Data &td = todo::data();
+    logLine("[hb] up=%lus heap=%luB min=%luB rssi=%d srvPoll=%lu todoPoll=%lu lpm=%d",
+            (unsigned long)(millis() / 1000), (unsigned long)heap,
+            (unsigned long)g_heapMin, netwifi::rssi(), (unsigned long)sd.pollCount,
+            (unsigned long)td.pollCount, (int)g_lpm);
   }
 
   // 服务器快照：非阻塞，联网后每 15 秒拉一次。失败不清旧数据 ——

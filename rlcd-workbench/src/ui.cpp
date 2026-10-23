@@ -6,6 +6,8 @@
 
 #include "ui.h"
 
+#include "version.h"
+
 #include <cstdio>
 #include <cstring>
 
@@ -525,8 +527,12 @@ void drawAbout(U8G2 *g, const AppState &s) {
   // 否则真实域名又回到公开仓库里了。
   static char s_dataRow[48];
   snprintf(s_dataRow, sizeof(s_dataRow), "数据源  %s/status/", cfg::kDataHost);
+  // 版本号从 version.h 来，不写字面量 —— 关于页与开机报告必须说同一个数。
+  static char s_verRow[40];
+  snprintf(s_verRow, sizeof(s_verRow), "固件    %s (%s)", ver::kVersion, ver::kDate);
   const char *kRows[] = {
       "目标板  Waveshare ESP32-S3-RLCD-4.2",
+      s_verRow,
       "屏幕    4.2 寸 400x300 全反射黑白",
       "时间源  PCF85063 RTC + NTP 校正",
       s_dataRow,
@@ -553,6 +559,9 @@ void drawAbout(U8G2 *g, const AppState &s) {
     y += 16;
   }
 
+  // 上电 1 秒内按 BOOT 是下载模式，不是我们的手势 —— 这一条写在屏上比写在
+  // 文档里有用：见过的人不会以为"按键坏了"。
+  text(g, 8, y + 4, "上电 1 秒内 BOOT 键无效");
   textCenter(g, cfg::kLcdWidth / 2, 290, "无背光，请放在有光处");
 }
 
