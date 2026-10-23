@@ -173,6 +173,29 @@ void drawHeader(U8G2 *g, const AppState &s, bool showTime) {
   hline(g, 0, cfg::kHeaderH, cfg::kLcdWidth);
 }
 
+bool footerNote(const AppState &s, char *buf, size_t cap) {
+  const char *note = nullptr;
+  if (!s.serverHasData) {
+    note = "无数据";
+  } else if (s.wifi != WIFI_ON) {
+    note = "离线";
+  } else if (s.serverStale) {
+    note = "停更";
+  }
+  if (note == nullptr) {
+    return false;
+  }
+  const uint32_t a = s.serverAgeSec;
+  if (!s.serverHasData) {
+    snprintf(buf, cap, "%s", note);
+  } else if (a < 60) {
+    snprintf(buf, cap, "%s %us", note, (unsigned)a);
+  } else {
+    snprintf(buf, cap, "%s %um", note, (unsigned)(a / 60u));
+  }
+  return true;
+}
+
 void drawFooter(U8G2 *g, const AppState &s) {
   hline(g, 0, cfg::kContentBottom, cfg::kLcdWidth);
   g->setFont(F_CN);
@@ -188,27 +211,10 @@ void drawFooter(U8G2 *g, const AppState &s) {
   if (s.panel != 1) {
     return;
   }
-  const char *note = nullptr;
-  if (!s.serverHasData) {
-    note = "无数据";
-  } else if (s.wifi != WIFI_ON) {
-    note = "离线";
-  } else if (s.serverStale) {
-    note = "停更";
-  }
-  if (note == nullptr) {
-    return;
-  }
   char mid[24];
-  const uint32_t a = s.serverAgeSec;
-  if (!s.serverHasData) {
-    snprintf(mid, sizeof(mid), "%s", note);
-  } else if (a < 60) {
-    snprintf(mid, sizeof(mid), "%s %us", note, (unsigned)a);
-  } else {
-    snprintf(mid, sizeof(mid), "%s %um", note, (unsigned)(a / 60u));
+  if (footerNote(s, mid, sizeof(mid))) {
+    textCenter(g, cfg::kLcdWidth / 2, cfg::kContentBottom + 16, mid);
   }
-  textCenter(g, cfg::kLcdWidth / 2, cfg::kContentBottom + 16, mid);
 }
 
 // ---- 面板一：本地 ----
@@ -436,6 +442,10 @@ void drawServer(U8G2 *g, const AppState &s) {
 }  // namespace
 
 namespace ui {
+
+bool serverFooterNote(const AppState &s, char *buf, size_t cap) {
+  return footerNote(s, buf, cap);
+}
 
 void touchFonts() {
   volatile const uint8_t *p[] = {F_CN, F_BIG, F_SEC, F_MID, F_VAL};

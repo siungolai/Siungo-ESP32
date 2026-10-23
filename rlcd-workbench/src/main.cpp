@@ -368,6 +368,20 @@ bool syncServerToState() {
     g_state.serverStale = staleNow;
     g_state.serverAgeSec = ageSec;
     changed = true;
+
+    // 把页尾那句话原样打进串口。A2 的「断网/停更时页尾出现龄期」是视觉断言，
+    // 没有这行日志就只能靠肉眼看屏 —— 而肉眼看屏没法进自动化、也没法回放。
+    static char lastNote[24] = {};
+    char note[24];
+    if (ui::serverFooterNote(g_state, note, sizeof(note))) {
+      if (strcmp(note, lastNote) != 0) {
+        logLine("[ui] footer srv: \"%s\"", note);
+        snprintf(lastNote, sizeof(lastNote), "%s", note);
+      }
+    } else if (lastNote[0] != '\0') {
+      logLine("[ui] footer srv: (empty)");
+      lastNote[0] = '\0';
+    }
   }
 
   if (!hasData) {

@@ -100,6 +100,11 @@ void drawToast(U8G2 *g, const char *text);
 void drawSeconds(U8G2 *g, const AppState &s);
 void secondsRect(int *x, int *y, int *w, int *h);
 
+// 面板二页尾中段要显示的那句话（「无数据」/「离线 42s」/「停更 1m」）。
+// 正常时返回 false，页尾保持安静。抽成函数是为了让主循环能把同一句话打进
+// 串口 —— 否则「屏上到底该显示什么」只能靠肉眼看屏，没法在自动化里证明。
+bool serverFooterNote(const AppState &s, char *buf, size_t cap);
+
 // 把 UI 用到的那几个字库显式引用一遍，保证 linker 不会因为
 // section 回收把没被直接点名的字库丢掉。
 void touchFonts();
