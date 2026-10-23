@@ -100,7 +100,7 @@ location /status/ {
 
 ### 探测必须带正确的 Host 头（2026-10-17 实测）
 
-采集器探测 `svc_web` / `svc_api` / `svc_upload` 时请求的是 `https://127.0.0.1/...`，此时 `Host` 头是 `127.0.0.1`。nginx 按 `Host` 选择 server 块，`127.0.0.1` 不匹配主站的 `server_name 8.138.225.161 www.siungo.top siungo.top`，请求被路由到别的 vhost，于是即使 Go 后端本身正常应答（journalctl 里 `path=/api/photos status=200`），回到 nginx 却是 `404 page not found`。
+采集器探测 `svc_web` / `svc_api` / `svc_upload` 时请求的是 `https://127.0.0.1/...`，此时 `Host` 头是 `127.0.0.1`。nginx 按 `Host` 选择 server 块，`127.0.0.1` 不匹配主站的 `server_name <公网IP> www.siungo.top siungo.top`，请求被路由到别的 vhost，于是即使 Go 后端本身正常应答（journalctl 里 `path=/api/photos status=200`），回到 nginx 却是 `404 page not found`。
 
 实测对照（三条同 URL、只改 Host）：
 
