@@ -6,7 +6,8 @@
 # docs/ 说明。安装后每次 git commit 自动运行（含 --amend）。
 #
 # 检查两项：
-#   1. 敏感信息扫描——真实 MAC 地址、secrets.h、疑似明文凭据
+#   1. 敏感信息扫描——真实 MAC 地址、secrets.h、疑似明文凭据，
+#      以及 secrets.h 里真实凭据值（SSID / 密码 / 监控 key）在暂存内容中的复现
 #   2. status-oled 版式自检——仅当本次提交触及该项目时才跑
 #
 # 跳过方式（必须显式声明，不提供静默绕过）：
@@ -85,6 +86,41 @@ if [ -n "$CRED" ]; then
   echo "${YEL}  ⚠ 疑似硬编码凭据（请人工确认）：${OFF}"
   echo "$CRED" | sed 's/^/      /'
   # 仅警告，不阻断——避免在文档/示例里误伤导致绕过钩子
+fi
+
+# 1d. 真实凭据值复现扫描。钩子里不存任何秘密——运行时从本机 gitignored 的
+#     secrets.h 里读出 SSID / 密码 / 监控 key，再拿这些**字面值**去扫暂存内容。
+#     挡的是「把真实 SSID 贴进文档示例日志」这类事故：2026-10-23 就在
+#     status-oled3/README.md 里发现过一次 wifi: connecting to "..." 的真实 SSID。
+#     只扫这三个宏，不扫 RLCD_* 主机名——那些是刻意公开的域名。
+IGNORED_SECRETS=$(git ls-files --others --ignored --exclude-standard 2>/dev/null \
+  | grep -E '(^|/)secrets\.h$' || true)
+
+if [ -z "$IGNORED_SECRETS" ]; then
+  echo "  ✓ 真实凭据值扫描跳过（本机没有 secrets.h）"
+else
+  REALVALS=$(for f in $IGNORED_SECRETS; do
+      sed -nE 's/^[[:space:]]*#[[:space:]]*define[[:space:]]+(WIFI_SSID|WIFI_PASS|MONITOR_KEY)[[:space:]]+"([^"]*)".*/\2/p' "$f"
+    done | awk 'length($0) >= 4' | sort -u)
+
+  if [ -z "$REALVALS" ]; then
+    echo "  ✓ 真实凭据值扫描跳过（secrets.h 里没有可扫描的值）"
+  else
+    ADDED_LINES=$(git diff --cached -U0 -- . ':(exclude)*.example' | grep -E '^\+' || true)
+    LEAKED=$(printf '%s\n' "$REALVALS" | while IFS= read -r v; do
+               [ -n "$v" ] || continue
+               if printf '%s\n' "$ADDED_LINES" | grep -Fq -- "$v"; then echo "$v"; fi
+             done)
+    if [ -n "$LEAKED" ]; then
+      echo "${RED}  ✗ 暂存内容里出现了 secrets.h 中的真实凭据值：${OFF}"
+      printf '%s\n' "$LEAKED" | sed 's/^/      /'
+      echo "      真实 SSID / 密码 / 监控 key 不得进入仓库，包括文档与日志示例。"
+      echo "      文档里的示例请写成 <ssid> / <password> / <monitor-key>。"
+      FAILED=1
+    else
+      echo "  ✓ 真实凭据值扫描通过（未发现 secrets.h 的真实值）"
+    fi
+  fi
 fi
 
 # ====================================================== 检查 2：status-oled 版式
