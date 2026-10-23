@@ -39,9 +39,35 @@ constexpr uint32_t kSpiClockHz = 24000000;
 constexpr int kKeyBoot = 0;   // 低有效，上电 1 秒内的事件要丢弃（进下载模式）
 constexpr int kKeyUser = 18;  // 低有效，内部上拉
 
-// ---- I2C（RTC / 温湿度，M2 才用）----
+// ---- I2C 总线（一条总线挂四颗从设备，地址互不冲突）----
+// 注意：与仓库里旧 OLED 工程的 SDA=5 / SCL=4 完全不同 —— 那两颗脚在这块板上
+// 是屏幕的 DC 与 TE。详见 HARDWARE.md §11.6。
 constexpr int kI2cSda = 13;
 constexpr int kI2cScl = 14;
+constexpr uint32_t kI2cClockHz = 400000;
+
+constexpr uint8_t kAddrShtc3 = 0x70;   // 温湿度
+constexpr uint8_t kAddrRtc = 0x51;     // PCF85063 时钟（M2 第 5 步才用）
+constexpr uint8_t kAddrEs8311 = 0x18;  // 音频 codec（本期不用）
+constexpr uint8_t kAddrEs7210 = 0x40;  // 音频 ADC（本期不用）
+
+// ---- SHTC3 温度补偿 ----
+// 官方 BSP 的换算式是 175*raw/65536 - 45 - 4，比数据手册多减 4 °C
+// （i2c_equipment.cpp:98，常量 SHTC3_PETP_VOL = 4）。这不是手册要求，
+// 是官方例程的取向：先照抄以便对齐官方读数，同时把未补偿值一起打出来。
+// 与手持表对不上时，先看这两个数差多少（docs/策划案.md §7 第 9 项）。
+constexpr float kShtc3TempOffsetC = -4.0f;
+
+// ---- 采样周期 ----
+constexpr uint32_t kSensorPollMs = 60000;  // 温湿度 60 秒一次
+
+// ---- 自发热诊断（做完就删）----
+// 开机后先停掉一切重绘，静置 kThermalProbeMs，每 10 秒记录一次板温与芯片温度。
+// 目的是把「读数 35 °C」拆成两个来源：SoC 自身热 + 我们自己刷新造成的热。
+// 静置期间温度还在涨 -> 是芯片持续发热的余温；掉下来 -> 是重绘贡献的。
+constexpr bool kThermalProbe = false;
+constexpr uint32_t kThermalProbeMs = 180000;
+constexpr uint32_t kThermalProbePeriodMs = 10000;
 
 // ---- 电池采样（M2 才用）----
 constexpr int kBatAdc = 4;

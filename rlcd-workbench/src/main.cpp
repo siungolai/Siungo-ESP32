@@ -1,7 +1,8 @@
-// rlcd-workbench / 主程序（M1：页面骨架 + 两键六手势）
+// rlcd-workbench / 主程序（M2：接真实传感器）
 //
-// M1 阶段数据全是假的（fillFakeData），M2 才接 RTC / 传感器 / 服务器。
-// 本文件的职责是：状态机（面板 / 关于页 / 对比度）、按键分发、刷新与省电策略。
+// M1 的页面骨架与两键六手势已完成。M2 起逐步把 fillFakeData() 里的假数据换成
+// 真值，顺序是：I2C 总线与 SHTC3 温湿度 → 电量 → WiFi → 服务器数据 → RTC + NTP。
+// 本文件的职责仍是：状态机（面板 / 关于页 / 对比度）、按键分发、刷新与省电策略。
 
 #include <Arduino.h>
 
@@ -11,8 +12,10 @@
 
 #include "clock.h"
 #include "config.h"
+#include "i2c.h"
 #include "input.h"
 #include "rlcd.h"
+#include "shtc3.h"
 #include "ui.h"
 
 namespace {
@@ -25,8 +28,10 @@ uint32_t g_contrastHintUntil = 0;
 uint32_t g_bootHintUntil = 0;
 uint32_t g_lastActivityMs = 0;
 uint32_t g_lastSecond = 0;
+uint32_t g_lastSensorMs = 0;
 bool g_lpm = false;
 bool g_dirty = true;
+bool g_sensorOk = false;
 
 void logLine(const char *fmt, ...) {
   char buf[128];
@@ -109,6 +114,104 @@ void clockSelfTest() {
   logLine("[clk-test] result = %s (%d fail)", fails == 0 ? "OK" : "FAIL", fails);
 }
 
+// ---- 温湿度 ----
+//
+// 一次读数里有三个层次，日志全部打出来，因为「哪个才是对的」取决于校准：
+//   1. rawTemp / rawHumi：寄存器原始 16 位，两段 CRC 都已校验；
+//   2. tempC  ：数据手册公式 175*raw/65536 - 45；
+//   3. tempAdjC：再叠加官方例程那个 -4 °C 补偿。
+// 官方为什么减 4 我没有权威依据（i2c_equipment.cpp:98 的 SHTC3_PETP_VOL = 4），
+// 所以两个值都印出来 —— 拿手持表一对就知道该采用哪个（§7 第 9 项）。
+void sensorSelfTest() {
+  if (!shtc3::ready()) {
+    logLine("[shtc3] self-test skipped: sensor not ready");
+    return;
+  }
+  logLine("[shtc3] id = 0x%04X", (unsigned)shtc3::sensorId());
+
+  for (int i = 0; i < 3; ++i) {
+    shtc3::Reading r;
+    if (!shtc3::read(&r)) {
+      logLine("[shtc3] sample %d: FAIL (i2c err=%d)", i + 1, i2cbus::lastError());
+      continue;
+    }
+    logLine("[shtc3] sample %d: raw=%u/%u  t=%.2fC  t_adj=%.2fC  rh=%.1f%%", i + 1,
+            (unsigned)r.rawTemp, (unsigned)r.rawHumi, r.tempC, r.tempAdjC, r.humi);
+    delay(120);
+  }
+
+  // 字节序判定（§7 第 9 项）。
+  //
+  // 换用「湿度优先」的命令 0x58E0 再量一次，把芯片返回的两对原始值原样打出来
+  // （不做任何解释）。如果 0x7866 是「先温度」、0x58E0 是「先湿度」，两组
+  // 「第一对」就应该互换 —— 那说明命令字有效、解码没错，读数与体感不符只能
+  // 是别的物理原因。两组一模一样则说明命令字被忽略、或根本不是这颗芯片。
+  shtc3::Reading rh;
+  if (shtc3::readRhFirst(&rh)) {
+    logLine("[shtc3] cmd 0x58E0 (RH first): first=%u second=%u", (unsigned)rh.rawFirst,
+            (unsigned)rh.rawSecond);
+  } else {
+    logLine("[shtc3] cmd 0x58E0: FAIL (i2c err=%d)", i2cbus::lastError());
+  }
+
+  // 芯片内部温度只作参照：它读的是 SoC 结温，恒定高于环境温度，
+  // 但能回答「板子到底热不热」这个问题。
+  logLine("[shtc3] ref: chip internal = %.1fC (not ambient)", (double)temperatureRead());
+}
+
+// 采一次温湿度并写进界面状态。
+//
+// 失败时保留上一次的值，只在串口留痕 —— 屏幕上突然冒出「--.-」比显示一个
+// 几十秒前的读数更糟，而这块屏是常驻桌面、要能一眼扫过去的。
+bool readSensors(bool verbose) {
+  if (!shtc3::ready()) {
+    return false;
+  }
+  shtc3::Reading r;
+  if (!shtc3::read(&r)) {
+    if (verbose) {
+      logLine("[shtc3] read failed (i2c err=%d)", i2cbus::lastError());
+    }
+    return false;
+  }
+  g_state.tempC = r.tempAdjC;
+  g_state.humi = r.humi;
+  g_sensorOk = true;
+  g_dirty = true;
+  if (verbose) {
+    logLine("[shtc3] t=%.2fC rh=%.1f%% (raw %u/%u)", r.tempAdjC, r.humi, (unsigned)r.rawTemp,
+            (unsigned)r.rawHumi);
+  }
+  return true;
+}
+
+// 自发热诊断：停掉一切重绘，静置 kThermalProbeMs，定期记录两种温度。
+//
+// 为什么要做这件事：SHTC3 读到 35 °C，而 SoC 结温 36 °C 也跟着走 —— 两者贴得
+// 太近，无法判断「这块板本来就 35 °C」还是「我们自己刷屏把它烘热了」。重绘
+// 只在面板一发生，1 秒一帧、每帧约 15 ms，理论上只有 1.5% 占空比，但不该靠
+// 推测，静置一百八十秒看温度走哪去，比讨论有用。
+void runThermalProbe() {
+  logLine("[therm] probe start: %lus, no redraw, cpu=%uMHz",
+          (unsigned long)(cfg::kThermalProbeMs / 1000), (unsigned)getCpuFrequencyMhz());
+  const uint32_t t0 = millis();
+  uint32_t next = t0 + cfg::kThermalProbePeriodMs;
+  unsigned n = 0;
+  while (millis() - t0 < cfg::kThermalProbeMs) {
+    if ((int32_t)(millis() - next) >= 0) {
+      next += cfg::kThermalProbePeriodMs;
+      shtc3::Reading r;
+      const bool ok = shtc3::read(&r);
+      logLine("[therm] t+%3lus chip=%5.1fC shtc3=%s%.2fC rh=%.1f%%",
+              (unsigned long)((millis() - t0) / 1000), (double)temperatureRead(),
+              ok ? "" : "FAIL ", ok ? r.tempC : 0.0f, ok ? r.humi : 0.0f);
+      ++n;
+    }
+    delay(50);
+  }
+  logLine("[therm] probe done, %u samples", n);
+}
+
 void fillFakeData() {
   g_state.panel = 0;
   g_state.year = 2026;
@@ -132,6 +235,8 @@ void fillFakeData() {
   workclock::begin(t);
   g_state.tempC = 24.5f;
   g_state.humi = 48.0f;
+  // 温湿度先给一组占位值，shtc3 第一次读数成功就被覆盖。
+  // 传感器读不到时屏幕上就是这组数，串口会有 [shtc3] MISSING 或 read failed。
   g_state.batteryPct = 87;
   g_state.wifi = WIFI_ON;
   g_state.todoTotal = 6;
@@ -256,7 +361,7 @@ void printBootReport() {
   Serial.println();
   Serial.println("========================================");
   Serial.println("project : rlcd-workbench");
-  Serial.println("stage   : M1 boot");
+  Serial.println("stage   : M2 boot (i2c + shtc3)");
   Serial.println("----------------------------------------");
   Serial.printf("chip    : %s rev %d\n", ESP.getChipModel(), (int)ESP.getChipRevision());
   Serial.printf("cores   : %d @ %d MHz\n", (int)ESP.getChipCores(), (int)getCpuFrequencyMhz());
@@ -269,6 +374,10 @@ void printBootReport() {
   U8G2 *g = g_lcd.g();
   Serial.printf("canvas  : %ux%u\n", g ? (unsigned)g->getDisplayWidth() : 0U,
                 g ? (unsigned)g->getDisplayHeight() : 0U);
+  Serial.printf("i2c     : sda=%d scl=%d @%lu Hz, %s\n", cfg::kI2cSda, cfg::kI2cScl,
+                (unsigned long)cfg::kI2cClockHz, i2cbus::ready() ? "up" : "DOWN");
+  Serial.printf("shtc3   : %s, id=0x%04X\n", shtc3::ready() ? "ready" : "MISSING",
+                (unsigned)shtc3::sensorId());
   Serial.printf("contrast: level %u/%u (%u)\n", (unsigned)(g_contrastIdx + 1),
                 (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[g_contrastIdx]);
   Serial.println("========================================");
@@ -293,6 +402,25 @@ void setup() {
 
   fillFakeData();
   clockSelfTest();
+
+  // ---- M2 第 1+2 步：I2C 总线 + SHTC3 ----
+  // 总线先建，扫描一次把整条线上的从设备列出来（这块板上应有 0x18 / 0x40 / 0x51 / 0x70）。
+  // 失败也不至于让设备变砖：屏幕不依赖 I2C，最坏情况是温湿度那几个字停在占位值。
+  if (i2cbus::begin(cfg::kI2cSda, cfg::kI2cScl)) {
+    logLine("[i2c] bus up (sda=%d scl=%d)", cfg::kI2cSda, cfg::kI2cScl);
+    i2cbus::scan();
+  } else {
+    logLine("[i2c] bus init FAILED (err=%d)", i2cbus::lastError());
+  }
+
+  if (shtc3::begin()) {
+    sensorSelfTest();
+  } else {
+    logLine("[shtc3] init FAILED (err=%d)", i2cbus::lastError());
+  }
+  readSensors(false);
+  g_lastSensorMs = millis();
+
   printBootReport();
 
   const uint32_t t0 = millis();
@@ -300,6 +428,12 @@ void setup() {
   Serial.printf("[m1] first full frame = %u ms\n", (unsigned)(millis() - t0));
   noteActivity();
   g_lastSecond = millis() / 1000;
+
+  if (cfg::kThermalProbe) {
+    runThermalProbe();  // 诊断完把 cfg::kThermalProbe 改回 false
+    noteActivity();
+    g_lastSecond = millis() / 1000;
+  }
 }
 
 void loop() {
@@ -354,6 +488,13 @@ void loop() {
   if (g_bootHintUntil != 0 && (int32_t)(millis() - g_bootHintUntil) >= 0) {
     g_bootHintUntil = 0;
     g_dirty = true;
+  }
+
+  // 温湿度 60 秒一次。单次采样在 I2C 上约 70 ms（唤醒 50 + 测量 20），
+  // 这个时长会让秒边界掉一拍 —— 所以下面用 delta 补齐而不是固定 +1。
+  if (millis() - g_lastSensorMs >= cfg::kSensorPollMs) {
+    g_lastSensorMs = millis();
+    readSensors(true);
   }
 
   if (g_dirty) {
