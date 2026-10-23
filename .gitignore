@@ -49,3 +49,10 @@ __pycache__/
 # pre-push 编译钩子的临时目录（pio 必须能写 TEMP；指到仓库内可写位置，
 # 构建日志写在 <仓库>/.tmp-pio/build.log，不进版本控制）
 /.tmp-pio/
+
+# rlcd-workbench 的策划案与决策记录：暂不公开（详细设计含器件级取舍与
+# 服务器部署细节，公开仓库暂不入库）。README.md 与 GLOSSARY.md 仍入库，
+# 里面保留了足够的方案摘要；需要完整文档时看本地工作区。
+# 注意必须写全路径前缀：这条规则只覆盖 rlcd-workbench 一个项目，
+# status-oled3/docs/ 与 pet-oled3/docs/ 是已入库的项目文档，不受影响。
+/rlcd-workbench/docs/

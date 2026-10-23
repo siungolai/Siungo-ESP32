@@ -926,7 +926,208 @@ DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#5
 
 ---
 
-## 11. 相关文档
+## 11. 显示屏：ESP32-S3-RLCD-4.2 全反射屏（官方资料已核实，待 bringup）
+
+### 11.0 本节的证据等级声明
+
+本节参数**不是本机实测**——来自**微雪官方资料的离线归档**（`.doc/ESP32-S3-RLCD/`，已被 `.gitignore` 排除、不入库），
+经官方文档站 <https://docs.waveshare.net/ESP32-S3-RLCD-4.2/> 核对。
+
+按本文件开头的三分类，本节整体标注为 **规格已核实**，凡带「⚠️ 待 bringup 验证」字样的条目表示**尚未在本机跑通**。
+本节不做实测的原因是：本项目（`rlcd-workbench`）目前**只有方案、没有固件**，M0 之前没有可测对象。
+
+> 📌 引用规则：本项目文档引用本节时用 `§11.x` 定位（章节锚点）。**官方归档不进库**，所以本节是可复核的唯一落点。
+
+### 11.1 板级参数与显示几何
+
+| 项目 | 参数 | 依据 |
+|---|---|---|
+| 型号 | **Waveshare ESP32-S3-RLCD-4.2** | 官方产品页 |
+| 主控 | ESP32-S3-WROOM-1-N16R8（240 MHz 双核 LX7，16 MB Flash + 8 MB OCT PSRAM） | 官方 BSP |
+| 屏幕 | 4.2 寸**全反射**（Reflective LCD）黑白屏，**1bpp** | 官方规格 |
+| 驱动 IC | **ST7305**（SPI 接口） | 官方 BSP / 例程 |
+| 物理尺寸 | 300 × 400 | 官方文档 |
+| **驱动尺寸** | **400 宽 × 300 高（横屏）** | 官方 BSP factory `main.cpp`、官方 u8g2 例程、小智固件 `config.h` 三方一致 |
+| 背光 | **无**。靠环境光成像，**暗处不可见** | 官方规格 |
+| 颜色 | `ColorBlack = 0` / `ColorWhite = 0xff` | 官方 `09_LVGL_V9_Test/display_bsp.h:12-14` |
+| 帧缓冲 | 全缓冲 **15200 字节**（304 字节/行 × 50 行） | 官方 u8g2 例程 `ST7305_BUFFER_ROW_BYTES` |
+| SPI 时钟 | 官方例程 **24 MHz**（IDF 例程 20 MHz，官方 factory 10 MHz） | 官方例程 |
+
+> ⚠️ **横屏这件事容易搞反**：官方文档写「300×400」是**物理**尺寸，驱动时按 **400 宽 × 300 高**。
+> u8g2 官方只提供竖屏 300×400 的 ST7305 构造器，横屏要靠 `U8G2_R1` 换算 + 自定义 `DRAW_TILE`，
+> 详见 `rlcd-workbench` 的 `ADR-0001`（`docs/` 暂不入库）。
+
+### 11.2 按键
+
+| 键 | 引脚 | 有效电平 | 备注 |
+|---|---|---|---|
+| **BOOT** | **GPIO0** | 低有效 + 内部上拉 | 官方 `multi_button` 支持单击 / 双击 / 长按。**按住 BOOT 重新上电会进下载模式**，故固件须丢弃上电 1 秒内的 BOOT 事件 |
+| **KEY** | **GPIO18** | 低有效 + 上拉（R9/R17 10 kΩ） | 自定义功能键，5 ms 定时扫描 |
+| **PWR** | **无 GPIO** | — | 纯电源开关：经 R45(1 kΩ) 驱动 Q5=AO3400，与 Q3/Q4=AO3401(PMOS)、D1=MBR230LSFT1G 构成 VSYS 开关。**不可读电平，不能当普通 IO** |
+
+> ⚠️ 原理图上 GPIO17 处还标了一个 "2KEY"，但官方速查表把 GPIO17 记为**排母 GP17 空闲扩展**。**以速查表为准**，GPIO17 视为空闲。
+
+### 11.3 电池、电源与指示灯
+
+| 项目 | 参数 |
+|---|---|
+| 电池采样脚 | **GPIO4**（ADC1_CH3，12 bit，12 dB 衰减） |
+| 分压网络 | VBAT → **R21 200 kΩ 1%** → 分压点 → **R23 100 kΩ 1%** → GND；C21/C33 100 nF 并联滤波。**分压比 = 1/3** |
+| 官方电压还原 | `vol = 0.001 * tage * 3`（`tage` 为分压点校准毫伏） |
+| 官方电量换算 | `< 3.0 V → 0%`；`> 4.12 V → 100%`；否则 `(vol - 3.0) / 1.12 * 100` |
+| 充电管理 | **ETA6098**（U7） |
+| **CHG 灯** | LED2，由 ETA6098 的 **STAT** 引脚直接驱动（经 R51 27 kΩ 到 GND）。**没有 GPIO 可读** |
+| **WRN 灯** | LED1，接 BAT1+ 一端、经 R31 1.2 kΩ 接反接检测电路（Q5/R41）。**没有 GPIO 可读** |
+| 电源链 | TPS63020 buck + RT9193 LDO |
+
+> 📌 **软件无法判断「正在充电」**。官方小智固件的 `GetBatteryLevel` 把 `charging` 写死为 `false`。
+> 因此界面只能显示电量百分比，**不能画充电图标**。
+>
+> 📌 CHG 灯**灭 = 充满**（不是常亮），WRN 灯**常亮 = 电池反接**。
+
+### 11.4 触摸：控制器型号官方未公布（⚠️ 待 bringup 验证）
+
+| 项目 | 事实 |
+|---|---|
+| 触摸控制器位置 | **在屏模组一侧**，通过 `TP_SDA` / `TP_SCL` 挂 I2C |
+| 板上独立触摸 IC | **没有**（TP3 / TP4 仅测试点） |
+| 中断脚 | **TP_INT = GPIO7**（输入） |
+| 复位脚 | **TP_RESET = GPIO42**（输出） |
+| **具体型号** | **官方未公布**。SensorLib 里备了 `TouchDrvCST226` / `CST816` / `CST92xx` / `GT9895` / `GT911` 五种驱动，但无法确定本屏模组用哪一种 |
+| 触摸 FPC 脚序 | **不发布**（原理图 PDF 文本层的引脚编号有错位与噪声） |
+
+> ⚠️ **触摸不能作为方案基石**。`rlcd-workbench` 的输入面只用 KEY + BOOT 两键（见其 ADR-0003）。
+
+### 11.5 引脚总表
+
+官方接口表在四个独立来源中逐项一致（官方速查表 §2、BSP `board_cfg.h`、ESPHome YAML、本表）。
+
+| GPIO | 归属 | 备注 |
+|---|---|---|
+| **GPIO0** | BOOT 键 | 低有效 + 内部上拉；下载模式 |
+| GPIO1 / 2 / 3 | 排母 GP1 / GP2 / GP3 | 空闲扩展 |
+| **GPIO4** | **SYS BAT_ADC** | 电池电压采样，ADC1_CH3 |
+| **GPIO5** | **LCD RS（DC）** | 数据 / 命令选择 |
+| GPIO6 | LCD TE | 撕裂 / 帧同步 |
+| GPIO7 | LCD TP INT | 触摸中断输入 |
+| GPIO8 | ES8311 I2S DSDIN | 音频数据输入（ADC 侧） |
+| GPIO9 | ES8311 I2S SCLK（BCLK） | |
+| GPIO10 | ES8311 I2S ASDOUT | 编解码侧输出 |
+| **GPIO11** | **LCD SCL** | 屏幕 SPI 时钟 |
+| **GPIO12** | **LCD SDA** | 屏幕 SPI 数据 |
+| **GPIO13** | **I2C SDA** | 触摸 / RTC / 排母扩展共用同一条数据线 |
+| **GPIO14** | **I2C SCL** | 同上 |
+| GPIO15 | RTC INT | |
+| GPIO16 | ES8311 I2S MCLK | |
+| GPIO17 | 排母 GP17 | 空闲扩展（见 §11.2 注） |
+| **GPIO18** | **SYS KEY** | 自定义功能键 |
+| GPIO19 / 20 | USB' N / P | 原生 USB，勿占 |
+| GPIO21 | SD MOSI | |
+| GPIO38 / 39 | SD SCK / MISO | |
+| **GPIO40** | **LCD CS** | |
+| **GPIO41** | **LCD RESET** | |
+| GPIO42 | LCD TP RESET | |
+| GPIO43 / 44 | U0TXD / U0RXD | UART0 |
+| GPIO45 | ES8311 I2S LRCK（WS） | |
+| **GPIO46** | **ES8311 PA CTRL** | NS4150B 功放使能 / 静音 |
+
+**排母 2×8（原理图读出）**：左列 pin1–8 = VCC3V3, GND, GPIO0, GPIO1, GPIO2, GPIO3, GPIO17, GPIO18；
+右列 pin9–16 = VBUS, GND, USB'_N(GPIO19), USB'_P(GPIO20), U0TXD(GPIO43), U0RXD(GPIO44), ESP32_SDA(GPIO13), ESP32_SCL(GPIO14)。
+
+### 11.6 I2C 总线与器件地址
+
+全板**一条 I2C**（I2C_NUM_0），**SDA = GPIO13 / SCL = GPIO14**，板载 5.1 kΩ 上拉（R20 / R22）+ 100 Ω 串阻（R25 / R26 / R27）。
+
+| 地址 | 器件 | 说明 |
+|---|---|---|
+| **0x18** | ES8311 | 音频 codec（输出 + ADC） |
+| **0x40** | ES7210 | 音频 ADC（双麦） |
+| **0x51** | PCF85063 | RTC，**自带充电电池座**，断电保时间 |
+| **0x70** | SHTC3 | 高精度温湿度 |
+
+**四个地址互不冲突。** RTC_SDA 与 ESP32_SDA 是同一网络。
+
+> ⚠️ 官方例程的 `I2cMasterBus I2cbus(14, 13, 0)` **参数序是 SCL 在前、SDA 在后**，与 Arduino `Wire.begin(sda, scl)` 相反。抄代码不要「顺手改成常规顺序」。
+
+### 11.7 显示初始化与刷新模式
+
+**ST7305 初始化序列有两套**（官方 BSP factory 版 vs 官方例程版），差异在 **4 组 gamma 寄存器**：
+
+| 寄存器 | u8g2 官方 `u8x8_d_st7305.c` | 官方例程 / BSP factory / LVGL 例程（**本板用这套**） |
+|---|---|---|
+| C1 | `0x3C, 0x3E, 0x3C, 0x3C` | **`0x69` ×4** |
+| C4 | `0x5A, 0x5C, 0x5A, 0x5A` | **`0x4B` ×4** |
+| D8 | `0xA6, 0xE9` | **`0x80, 0xE9`** |
+| B2 | `0x12` | **`0x02`** |
+| C0 | `0x12, 0x0A` | `0x11, 0x04` |
+| 反显 | `0x20`（关）+ `BB(0x4F)` | **`0x21`（开）** |
+
+> 📌 **画面发灰 / 反差不对，几乎都是这 4 组 gamma 抄错了。**
+
+**功耗与刷新档位**：
+
+| 命令 | 含义 | 行为 |
+|---|---|---|
+| `0x38` | HPM | 面板进入高功耗自刷新档，改动立刻可见 |
+| `0x39` | LPM | 面板进入低功耗自刷新档，**写入后要等约 1 秒才显示** |
+| `0x28` | Display Off | 全黑（面板电路仍供电） |
+
+**两档的实际帧率由 `0xB2`（FRCTRL 的 LFRA）决定**（数据手册 §8.2.3，p.76）：官方 u8g2 例程 `0xB2 = 0x02` → **LPM 1 Hz**；官方 BSP factory `0xB2 = 0x05` → **LPM 8 Hz**。
+
+> ⚠️ **官方离线归档里没有任何 `0x39` 的先例**——例程、BSP、u8g2 驱动都只发 `0x38`，官方 u8g2 甚至把 LPM **注释掉**（`u8x8_d_st7305.c:789-790`）。数据手册 §7.11 的 HPM↔LPM 切换序列**是图片**，文本层里只有 §7.10 Sleep-In/Out 的 100/300/100 ms，**没有切换延时数值**。
+>
+> 📌 **官方速查表把 `0x38` 标成「RAMWR（写显存）」是错的**——`0x38` = HPM，RAMWR 是 `0x2C`。该表也没有 HPM/LPM 行，别拿它当依据。
+
+**部分写入的粒度**：ST7305 的行列地址窗口以 **12 像素列块 × 4 行** 为最小单位（列地址**递减**，基准 `0x3C`；行窗口 `0x2B` + `{y_pos*4, y_pos*4+3}`）。
+
+**对比度命令**：`0x81` + 10 位值（`u8x8_d_st7305.c:864-871`，拆成 `arg<<2` 与 `arg>>6` 两个参数字节）。
+
+> ⚠️ 官方 u8g2 驱动的 `U8X8_MSG_DISPLAY_SET_POWER_SAVE` 分支复用了「122×250」的省电序列，
+> 但内容实际就是 ST7305 的 `0x29` / `0x28` 显示开关——**这个「看起来像 bug 的地方」无害**。
+
+### 11.8 音频链路（本期语音功能延期，见 `rlcd-workbench` ADR-0011）
+
+| 项目 | 参数 |
+|---|---|
+| I2S | **只有一组，ES8311 与 ES7210 共用**：MCLK=16 / BCLK=9 / WS=45 / DIN=10 / DOUT=8 |
+| 功放 | **NS4150B**（U12，Class-D 单声道），CTRL=**GPIO46**，`pa_gain=6`、`use_mclk=1` |
+| 扬声器 | **MX1.25 2PIN 外接接口**（原理图标 PH2.0 2P），随板附送 **8 Ω 2 W** 喇叭。**板上没有板载喇叭** |
+| 麦克风 | 两颗模拟麦座（MIC1 / MIC2）接 ES7210；MIC3 / MIC4 仅有网名无独立座体 |
+| 采样率 | 官方 BSP **16 kHz**；小智固件 **24 kHz** |
+| 格式 | MSB 32 bit slot、STEREO、16 bit |
+| 驱动库 | `esp_codec_dev`（官方归档 `07_Audio_Test/src/ExternLib/esp_codec_dev/`）。**PlatformIO registry 上 404**，需作本地库引入 |
+| ES7210 麦选择 | 官方两处不一致：Waveshare `codec_init.c` 用 `MIC1\|MIC3`（TDM 时加 `MIC2\|MIC4`）；小智固件用 MIC1–4 全开 + `AUDIO_INPUT_REFERENCE=true` |
+
+### 11.9 官方 AI 固件与第三方路径
+
+| 路径 | 状态 |
+|---|---|
+| **小智 AI 固件 v2.5.2** | 官方适配列表确认本板 = `v2.5.2_waveshare-esp32-s3-rlcd-4.2`（`merged-binary.bin` 11,289,121 B）。**走 ESP-IDF 编译，不能与自研固件共存、不能一键切换**；默认连小智官方服务端（文档称理论上可改连自有服务端，需相应配置） |
+| OpenClaw | 官方教程 `docs.waveshare.net/MimiClaw` |
+| ESP-Claw | 官方教程 `docs.waveshare.net/ESPClaw`，需 ≥8 MB Flash + PSRAM |
+| ESPHome | 官方给有传感器仪表盘与扬声器铃声测试两份 YAML |
+| ESP-ADF | 仅出现在 AIChats 仓库的 `doubao/esp-adf-example` 子模块，**不是本板主路径** |
+
+### 11.10 SD 卡
+
+| 项目 | 参数 |
+|---|---|
+| 模式 | **1-bit** |
+| 引脚 | CLK = GPIO38 / CMD = GPIO21 / D0 = GPIO39（MISO = GPIO39） |
+| 文件系统 | FAT32 |
+
+### 11.11 官方例程清单（Arduino 侧）
+
+`01_WIFI_AP` / `02_WIFI_STA` / `03_ADC_Test` / `04_I2C_PCF85063` / `05_I2C_SHTC3` / `06_SD_Card` /
+`07_Audio_Test` / `09_LVGL_V9_Test` / `10_U8G2_Test`。
+
+**统一要求**：开发板选 ESP32S3 Dev Module、Flash 16MB、**Partition Scheme 16M Flash (3MB APP / 9.9MB FATFS)**、PSRAM 选 OPI PSRAM、USB CDC On Boot Enabled。
+
+**版本基线**：Arduino-ESP32 ≥ 3.3.0（官方验证 3.3.12）、**U8g2 v2.36.18**、LVGL v9.3.0（Arduino 侧；IDF 侧 v8.3.11）、SensorLib v0.3.1、ESP-IDF ≥ 5.5.0（官方验证 5.5.5）。
+
+---
+
+## 12. 相关文档
 
 ### 数据手册原始出处
 
@@ -952,6 +1153,9 @@ DHT11 时序驱动为自写（`dht11-oled/src/dht11.h`），接口见 [§5.2](#5
 - 养成游戏的数值参数与交互面定稿：[数值平衡](pet-oled3/docs/adr/0008-numeric-balance-first-pass-parameters.md) / [两键交互面](pet-oled3/docs/adr/0009-two-button-interaction-coverage.md) / [蜂鸣器驱动强度](pet-oled3/docs/adr/0010-buzzer-direct-drive-needs-strongest-drive-cap.md)
 - 桌面状态显示器（三屏 + 按钮 + 蜂鸣器，**M0 / M1a / M1b 已上板实测通过**）：[`status-oled3/README.md`](status-oled3/README.md)
 - 状态显示器的决策记录（三屏分工、聚合端点、引脚分配等）：[`status-oled3/docs/adr/`](status-oled3/docs/adr/)
+- **RLCD 单屏多面板工作台**（4.2 寸全反射黑白屏 + 两键 + 温湿度 / 电量 / RTC + 服务器健康 + 待办，**方案阶段，无固件**）：[`rlcd-workbench/README.md`](rlcd-workbench/README.md)
+- RLCD 工作台的术语表（面板布局、手势矩阵、里程碑与断言的术语定义）：[`rlcd-workbench/GLOSSARY.md`](rlcd-workbench/GLOSSARY.md)
+- RLCD 工作台的策划案与 16 篇决策记录（显示栈选型、输入面、待办契约、语音延期等）：`rlcd-workbench/docs/` —— **暂不入库**，见本地工作区
 - 关键决策记录（PCA9548A 选型、单通道轮询、开机时间推进等）：[`pet-oled3/docs/adr/`](pet-oled3/docs/adr/)
 - 术语表（统一命名）：[`pet-oled3/CONTEXT.md`](pet-oled3/CONTEXT.md)
 - 仓库总览：[`README.md`](README.md)
