@@ -81,13 +81,60 @@ FIELDS = [
     "load1_x100",
     "disk_total_kb", "disk_used_kb", "disk_avail_kb",
     "net_if", "net_rx_bytes", "net_tx_bytes",
-    "svc_web", "svc_api", "svc_upload",
+    "svc_web", "svc_select", "svc_wb",
+    "svc_api", "svc_upload", "svc_ma12",
     "cert_days",
 ]
 
 # Host header for every 127.0.0.1 probe. Must be a name the main vhost answers
 # to, or nginx routes the request to another server block (see probe()).
 PROBE_HOST = "www.siungo.top"
+
+# The probes, as (field, url, host, expected_codes). The host is per-row now,
+# not one global constant: select.siungo.top is a different vhost and pinning
+# `Host: www.siungo.top` on its URL measured the wrong site (2026-10-23).
+#
+# svc_wb asks for /v1/models and accepts 401, on purpose. The obvious choice was
+# /health, and it is wrong here: nginx's wb.siungo.top vhost only proxies /v1/
+# and /admin/, so /health returns nginx's own 404 HTML, not the gateway's answer
+# (measured 2026-10-23: /health -> 404, /v1/models -> 401 with a JSON body).
+# 401 is a *better* liveness signal than 200 would be: it proves the request
+# reached the gateway and its auth middleware ran. The codes that mean "broken"
+# stay distinct -- 404 = nginx has no route, 502 = gateway down.
+HTTP_PROBES = (
+    ("svc_web", "https://127.0.0.1/", "www.siungo.top", (200,)),
+    ("svc_select", "https://127.0.0.1/", "select.siungo.top", (200,)),
+    ("svc_wb", "https://127.0.0.1/v1/models", "wb.siungo.top", (200, 401)),
+    ("svc_api", "https://127.0.0.1/api/photos", "www.siungo.top", (200,)),
+    ("svc_upload", "https://127.0.0.1/api/health", "www.siungo.top", (200,)),
+)
+
+# Outbound TCP probe. This one leaves the box, so its failure means something
+# different from the HTTP probes': those fail when OUR stack stopped serving,
+# this one fails when the far end is down OR we cannot get out at all. It also
+# does not speak HTTP -- 11948 is a raw port, so "connected" is the whole
+# signal and there is no status code to read.
+def _tcp_probes():
+    """出站 TCP 探针的目标从环境变量读，不写死在这个文件里。
+
+    这是一个**第三方主机 + 非标端口**。把它写进公开仓库等于替别人广播
+    「这个地址开放 11948」——本文件是入库的，所以只能留占位。
+
+    格式 `host:port`，在 crontab 里给：`PROBE_TCP_TARGET=host:port`。
+    没设就返回空元组，采集时会把这个字段写成 null（设备端画「?」而不是红叉：
+    「没配」和「挂了」必须能分开）。
+    """
+    raw = os.environ.get("PROBE_TCP_TARGET", "").strip()
+    if not raw or ":" not in raw:
+        return ()
+    host, _, port = raw.rpartition(":")
+    try:
+        return (("svc_ma12", host.strip(), int(port)),)
+    except ValueError:
+        return ()
+
+
+TCP_PROBES = _tcp_probes()
 
 
 def log(msg):
@@ -211,7 +258,7 @@ def net_bytes(iface):
     return num(rx), num(tx)
 
 
-def probe(url, timeout=5):
+def probe(url, host=PROBE_HOST, timeout=5):
     """HTTP status of one probe, or None when the request itself failed.
 
     Goes to 127.0.0.1 where nginx listens, with certificate verification off:
@@ -225,11 +272,15 @@ def probe(url, timeout=5):
     `404 page not found` because it was resolved against the wrong vhost
     (measured 2026-10-17: same URL with `Host: www.siungo.top` returns 200).
     Pinning it here keeps the probe measuring what it claims to measure.
+
+    host is a parameter rather than a constant as of 2026-10-23: with more than
+    one vhost on this box, one global PROBE_HOST meant every probe silently
+    measured www.siungo.top no matter which name was in the URL.
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    req = urllib.request.Request(url, headers={"Host": PROBE_HOST})
+    req = urllib.request.Request(url, headers={"Host": host})
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             return resp.status
@@ -237,6 +288,26 @@ def probe(url, timeout=5):
         return exc.code
     except Exception:
         return None
+
+
+def probe_tcp(host, port, timeout=3):
+    """1 when a TCP connection to host:port succeeds, else 0.
+
+    No bytes are sent and nothing is read: for a non-HTTP port, "the socket
+    opened" is the only signal available, and it is enough to answer "is the
+    far end reachable from here".
+
+    Deliberately returns 0 rather than None on failure, because the device's
+    field is a 1/0 flag. The cost is that "the far end is down" and "this box
+    cannot get out" become the same value -- acceptable for a status light,
+    and both deserve the same red mark (docs/adr/0014).
+    """
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        return 1
+    except Exception:
+        return 0
 
 
 def cert_days_left():
@@ -385,13 +456,20 @@ def collect():
 
     # Service liveness: each probe answers "is the whole stack serving", not
     # just "is the Go process alive".
-    for key, url in (("svc_web", "https://127.0.0.1/"),
-                     ("svc_api", "https://127.0.0.1/api/photos"),
-                     ("svc_upload", "https://127.0.0.1/api/health")):
-        code = probe(url)
-        snap[key] = 1 if code == 200 else 0
-        if code != 200:
+    for key, url, host, expect in HTTP_PROBES:
+        code = probe(url, host)
+        snap[key] = 1 if code in expect else 0
+        if code not in expect:
             failures.append("%s=%s" % (key, code))
+
+    for key, host, port in TCP_PROBES:
+        snap[key] = probe_tcp(host, port)
+        if snap[key] != 1:
+            failures.append("%s=unreachable(%s:%d)" % (key, host, port))
+    if not TCP_PROBES:
+        # 没配出站目标：字段仍然要有，值是 null。缺字段会让 status-check 报契约违规，
+        # 而「本机没配这条探针」不是契约坏了。
+        snap["svc_ma12"] = None
 
     snap["cert_days"] = cert_days_left()
     snap["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -454,8 +532,11 @@ def selftest():
         "net_rx_bytes": 976056208,
         "net_tx_bytes": 779650684,
         "svc_web": 1,
+        "svc_select": 1,
+        "svc_wb": 1,
         "svc_api": 1,
         "svc_upload": 1,
+        "svc_ma12": 1,
         "cert_days": 66,
     })
     print(json.dumps(snap, indent=1))

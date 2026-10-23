@@ -43,7 +43,9 @@ REQUIRED = {
         "swap_total_kb", "swap_used_kb", "load1_x100",
         "disk_total_kb", "disk_used_kb", "disk_avail_kb",
         "net_if", "net_rx_bytes", "net_tx_bytes",
-        "svc_web", "svc_api", "svc_upload", "cert_days",
+        "svc_web", "svc_select", "svc_wb",
+        "svc_api", "svc_upload", "svc_ma12",
+        "cert_days",
     ],
     "mailbox.json": [
         "generated_at", "available", "unread",

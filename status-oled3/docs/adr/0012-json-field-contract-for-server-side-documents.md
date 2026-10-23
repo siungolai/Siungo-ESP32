@@ -12,7 +12,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `status-oled3/docs/server/status-snapshot.py` | 每分钟采集 19 个字段，原子写 `/var/www/status/snapshot.json` |
+| `status-oled3/docs/server/status-snapshot.py` | 每分钟采集 22 个字段，原子写 `/var/www/status/snapshot.json` |
 | `status-oled3/docs/server/status-mailbox.py` | 每 5 分钟查 IMAP，原子写 `/var/www/status/mailbox.json` |
 | `status-oled3/docs/server/nginx-and-cron.md` | nginx `location` + `status-key.conf` + crontab 三段的脱敏模板 |
 | `status-oled3/docs/server/status-check.py` | 部署前字段契约校验器 |
@@ -23,7 +23,7 @@
 
 ### 1. 两份文档的字段清单冻结如下
 
-`snapshot.json`（19 个字段，`status-oled3/docs/server/status-snapshot.py` 的 `FIELDS` 常量即此清单的机器可读副本）：
+`snapshot.json`（22 个字段，`status-oled3/docs/server/status-snapshot.py` 的 `FIELDS` 常量即此清单的机器可读副本）：
 
 | 字段 | 类型 | 来源 |
 |---|---|---|
@@ -36,8 +36,19 @@
 | `disk_total_kb` `disk_used_kb` `disk_avail_kb` | int | `shutil.disk_usage` |
 | `net_if` | string | `/proc/net/route` 默认路由网卡名 |
 | `net_rx_bytes` `net_tx_bytes` | int 或 null | `/sys/class/net/<if>/statistics/` |
-| `svc_web` `svc_api` `svc_upload` | int（1/0） | urllib 探活 127.0.0.1 |
+| `svc_web` `svc_api` `svc_upload` | int（1/0） | urllib 探活 127.0.0.1，Host 钉本机 vhost |
+| `svc_select` | int（1/0） | 同上，Host `select.siungo.top` |
+| `svc_wb` | int（1/0） | 同上，URL `/v1/models`，Host `wb.siungo.top`，**期望 200 或 401** |
+| `svc_ma12` | int（1/0或 null） | **出站 TCP** 到 `<tcp-host>:<port>`（目标由环境变量 `PROBE_TCP_TARGET` 提供，不写进仓库——那是第三方主机加非标端口），连上即 1；未配置时为 null |
 | `cert_days` | int 或 null | `ssl.get_server_certificate` 剩余天数 |
+
+> 📌 **2026-10-23 扩了三个字段（19 → 22）**，起因是 `rlcd-workbench` 的面板二要把六个服务探针都摆上屏。三处已同改（`FIELDS` / 本表 / `REQUIRED`），`--selftest` 输出 22 字段、`status-check.py` 报 `22 fields, 423/1024 bytes`。
+>
+> `svc_select` / `svc_wb` 不是「多探一个域名」这么简单：原来的 `probe()` 把 `PROBE_HOST` 写死成 `www.siungo.top`，URL 里写别的域名也没用——Host 头一盖，nginx 只会路由到主站。所以 `probe()` 的签名同时改成了 `probe(url, host=PROBE_HOST)`，三条 URL 各自带自己的 vhost。
+>
+> `svc_wb` 探 `/v1/models` 而不是 `/health`，并且**接受 401 作为存活证据**。原本想用 `/health`（网关 `main.go:3488-3490` 里它免 Bearer），但 nginx 的 `wb.siungo.top` vhost 只转发 `/v1/` 与 `/admin/`，`/health` 落到 nginx 自己的 404（2026-10-23 实测：`/health` → 404 HTML，`/v1/models` → 401 JSON）。401 反而是更强的存活信号——它证明请求到了网关、且鉴权中间件跑过了。`404`（nginx 无此路由）与 `502`（网关挂了）仍然会判 ✗。为此 `HTTP_PROBES` 多了一列「期望状态码」。
+>
+> `svc_ma12` 与前五个的**失败含义相反**：前五个 ✗ 表示「本机这套栈没在服务」，`svc_ma12` ✗ 表示「本机出不去 / 对端挂了 / 链路断了」三件事之一。界面上两者都画叉，但排查方向完全不同，`rlcd-workbench` 的 §4.4 已写明。
 
 `mailbox.json`（5 个字段）：
 
@@ -78,12 +89,14 @@ python3 /usr/local/bin/status-check.py /var/www/status/snapshot.json \
 
 **本地已验证**（Windows，Python 3.10.4）：
 
-- 两份真实产出均 `OK`（snapshot 19 字段、mailbox 5 字段），exit 0；
+- 两份真实产出均 `OK`（初次验证时 snapshot 19 字段、mailbox 5 字段），exit 0；
 - 只含 1 个字段的 `snapshot.json` → 列出 18 条 missing，exit 1；
 - 缺 `unread` 的 `mailbox.json` → 列出 1 条 missing，exit 1；
 - `"svc_web": [1, 2]` → `unreadable type list: svc_web`，exit 1；
 - `"cert_days": true` → `boolean field (device reads 0/1): cert_days`，exit 1；
 - 非 JSON 内容 → `Expecting value`，exit 1。
+
+**2026-10-23 扩到 22 字段后复验**（同一台机器）：`--selftest` 输出 22 字段、`status-check.py` 报 `OK ... 22 fields, 423/1024 bytes`、exit 0；`py_compile` 两个脚本均通过。
 
 ### 5. 字段清单的两份拷贝必须一起改
 

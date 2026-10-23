@@ -108,7 +108,10 @@ location /status/ {
 # the unread number move for reasons that have nothing to do with mail.
 
 MAILTO=""
-* * * * * /usr/bin/python3 /usr/local/bin/status-snapshot.py
+* * * * * PROBE_TCP_TARGET=host:port /usr/bin/python3 /usr/local/bin/status-snapshot.py
+#            ^ 出站 TCP 探针（svc_ma12）的目标。**必须在这里给**：脚本入库，
+#              不能把第三方主机名＋非标端口写死在文件里。不设则该字段为 null，
+#              设备端画「?」（没配）而不是红叉（挂了）。
 */5 * * * * /usr/bin/python3 /usr/local/bin/status-mailbox.py
 
 # ---------------------------------------------------------------------------
