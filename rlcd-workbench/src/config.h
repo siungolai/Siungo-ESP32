@@ -89,6 +89,22 @@ constexpr uint32_t kWifiBackoffMaxMs = 60000;      // 退避上限 60 s（5/10/2
 // 软件断开走的是同一段状态机代码，能把「掉线后被重连逻辑捞回来」这条路径跑通。
 constexpr uint32_t kWifiDropTestMs = 0;
 
+// ---- 时间 ----
+// 时区名取自 src/tz.cpp 的内置表（newlib 没有 zoneinfo，见该文件头注释）。
+// 名字不在表里会回落到 UTC 并置 invalid，不会静默当成 UTC。
+constexpr const char *kTimeZoneName = "Asia/Shanghai";
+
+// NTP 只负责给 UTC，本地化由 tz 表算，所以传 0 偏移。
+constexpr const char *kNtpServer1 = "ntp.aliyun.com";
+constexpr const char *kNtpServer2 = "ntp1.aliyun.com";
+constexpr const char *kNtpServer3 = "cn.pool.ntp.org";
+
+// 校时周期：开机一次 + 之后每 24 小时一次。
+// 不是「只跑一次就再也不管」—— RTC 的日累积误差会一直涨。
+constexpr uint32_t kResyncIntervalMs = 24u * 60u * 60u * 1000u;
+constexpr uint32_t kNtpWaitTimeoutMs = 20000;      // 发起 SNTP 后最多等这么久
+constexpr int64_t kTimeSanityEpoch = 1700000000;   // 2023-11-15，低于它说明系统时间还没设
+
 // ---- 时序 ----
 constexpr uint32_t kBootKeyIgnoreMs = 1000;  // 上电后丢弃 BOOT 事件的窗口
 constexpr uint32_t kHpmSettleMs = 100;       // 切 HPM 后等画面稳定再写（自定值，待实测校正）

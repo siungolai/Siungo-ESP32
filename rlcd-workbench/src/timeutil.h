@@ -79,4 +79,58 @@ inline void addOneSecond(DT &t) {
   }
 }
 
+// 从 1970-01-01 起算的天数 <-> (年,月,日)。
+//
+// 用 Howard Hinnant 的 days_from_civil / civil_from_days：纯整数、无查表、
+// 对负数（1970 年之前）也成立。自己写循环也能算，但跨年累加在 1970..2099
+// 这段要跑几万次，而 RTC 与 NTP 每次同步都会调它。
+inline int64_t daysFromCivil(int y, unsigned m, unsigned d) {
+  y -= (m <= 2);
+  const int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153u * (m + (m > 2 ? -3u : 9u)) + 2u) / 5u + d - 1u;
+  const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+  return era * 146097 + (int64_t)doe - 719468;
+}
+
+inline void civilFromDays(int64_t z, int &y, int &m, int &d) {
+  z += 719468;
+  const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = (unsigned)(z - era * 146097);
+  const unsigned yoe = (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
+  y = (int)yoe + (int)era * 400;
+  const unsigned doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
+  const unsigned mp = (5u * doy + 2u) / 153u;
+  d = (int)(doy - (153u * mp + 2u) / 5u + 1u);
+  const int mpInt = (int)mp;
+  m = mpInt + (mpInt < 10 ? 3 : -9);  // 注意先转 int：无符号与 -9 混算会回绕
+  y += (m <= 2);
+}
+
+// 1970-01-01 是周四 = ISO 的 4。
+inline int weekdayFromDays(int64_t days) { return (int)(((days % 7) + 7 + 3) % 7) + 1; }
+
+// 把一个「当作 UTC 看待」的 DT 折成 epoch 秒。
+inline int64_t toEpoch(const DT &t) {
+  const int64_t days = daysFromCivil(t.year, (unsigned)t.month, (unsigned)t.day);
+  return days * 86400 + (int64_t)t.hour * 3600 + (int64_t)t.minute * 60 + t.second;
+}
+
+// epoch 秒折回 DT（weekday 一并算好）。
+inline DT fromEpoch(int64_t epoch) {
+  int64_t days = epoch / 86400;
+  int64_t rem = epoch % 86400;
+  if (rem < 0) {
+    rem += 86400;
+    --days;
+  }
+  DT t;
+  civilFromDays(days, t.year, t.month, t.day);
+  t.weekday = weekdayFromDays(days);
+  t.hour = (int)(rem / 3600);
+  t.minute = (int)((rem % 3600) / 60);
+  t.second = (int)(rem % 60);
+  return t;
+}
+
 }  // namespace tu

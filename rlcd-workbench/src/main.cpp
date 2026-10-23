@@ -17,6 +17,9 @@
 #include "input.h"
 #include "rlcd.h"
 #include "shtc3.h"
+#include "timesync.h"
+#include "timeutil.h"
+#include "tz.h"
 #include "ui.h"
 #include "net_wifi.h"
 
@@ -38,6 +41,7 @@ bool g_dirty = true;
 bool g_sensorOk = false;
 bool g_batteryOk = false;
 bool g_dropTestDone = false;
+timesync::Source g_lastTimeSource = timesync::Source::None;
 
 void logLine(const char *fmt, ...) {
   char buf[128];
@@ -163,6 +167,95 @@ void sensorSelfTest() {
   // 芯片内部温度只作参照：它读的是 SoC 结温，恒定高于环境温度，
   // 但能回答「板子到底热不热」这个问题。
   logLine("[shtc3] ref: chip internal = %.1fC (not ambient)", (double)temperatureRead());
+}
+
+// 时区表自检：用几个固定的 UTC 时刻去问「这个时区当时偏移多少」。
+//
+// 为什么要开机跑一遍：DST 规则一旦写错，只有到换季那天才会暴露 —— 而那时
+// 谁也想不到是这里的问题。这里把南北半球、跨年 DST、无 DST 三类都钉住。
+// 检查完会把时区恢复成 cfg::kTimeZoneName，不影响后续逻辑。
+void timeSelfTest() {
+  struct Case {
+    const char *zone;
+    int64_t utc;
+    int expectMin;
+  };
+
+  // 2026-07-15 12:00 UTC（北半球夏令时中 / 南半球冬令时中）
+  const tu::DT jul = [] {
+    tu::DT t;
+    t.year = 2026;
+    t.month = 7;
+    t.day = 15;
+    t.hour = 12;
+    t.minute = 0;
+    t.second = 0;
+    return t;
+  }();
+  // 2026-01-15 12:00 UTC（反过来）
+  tu::DT jan = jul;
+  jan.month = 1;
+
+  const int64_t julUtc = tu::toEpoch(jul);
+  const int64_t janUtc = tu::toEpoch(jan);
+
+  const Case cases[] = {
+      {"UTC", julUtc, 0},
+      {"Asia/Shanghai", julUtc, 480},
+      {"Asia/Tokyo", janUtc, 540},
+      {"Asia/Kolkata", julUtc, 330},
+      {"Europe/London", janUtc, 0},
+      {"Europe/London", julUtc, 60},
+      {"Europe/Paris", janUtc, 60},
+      {"Europe/Paris", julUtc, 120},
+      {"America/New_York", janUtc, -300},
+      {"America/New_York", julUtc, -240},
+      {"America/Los_Angeles", julUtc, -420},
+      {"America/Phoenix", julUtc, -420},  // 亚利桑那不实行 DST，全天候 -7
+      {"Australia/Sydney", janUtc, 660},  // 南半球：一月在夏令时里
+      {"Australia/Sydney", julUtc, 600},
+      {"Pacific/Auckland", janUtc, 780},
+      {"Pacific/Auckland", julUtc, 720},
+  };
+
+  int fail = 0;
+  for (const Case &c : cases) {
+    tz::setByName(c.zone);
+    const int got = tz::offsetMinutesAt(c.utc);
+    const bool ok = (got == c.expectMin);
+    if (!ok) ++fail;
+    logLine("[tz-test] %-20s %s  got=%+d min expect=%+d min", c.zone, ok ? "OK  " : "FAIL",
+            got, c.expectMin);
+  }
+
+  // 往返：本地 DT -> UTC -> 本地 DT 必须回到原值
+  tz::setByName(cfg::kTimeZoneName);
+  tu::DT probe = jul;
+  probe.month = 10;
+  probe.day = 23;
+  probe.hour = 14;
+  probe.minute = 13;
+  probe.second = 36;
+  const tu::DT back = tz::toLocal(tz::toUtc(probe));
+  const bool rtOk = back.year == probe.year && back.month == probe.month &&
+                    back.day == probe.day && back.hour == probe.hour &&
+                    back.minute == probe.minute && back.second == probe.second;
+  if (!rtOk) ++fail;
+  logLine("[tz-test] roundtrip %s  %04d-%02d-%02d %02d:%02d:%02d -> %04d-%02d-%02d %02d:%02d:%02d",
+          rtOk ? "OK  " : "FAIL", probe.year, probe.month, probe.day, probe.hour, probe.minute,
+          probe.second, back.year, back.month, back.day, back.hour, back.minute, back.second);
+
+  // epoch <-> 日历 往返 + 星期（2026-10-23 是周五 = 5）
+  tu::DT wd = probe;
+  wd.weekday = 0;
+  const tu::DT wdBack = tu::fromEpoch(tu::toEpoch(wd));
+  const bool wdOk = (wdBack.weekday == 5) && (wdBack.year == wd.year) &&
+                    (wdBack.month == wd.month) && (wdBack.day == wd.day);
+  if (!wdOk) ++fail;
+  logLine("[tz-test] weekday  %s  2026-10-23 -> wd=%d (expect 5 = Fri)", wdOk ? "OK  " : "FAIL",
+          wdBack.weekday);
+
+  logLine("[tz-test] result = %s (%d fail)", fail == 0 ? "OK" : "FAIL", fail);
 }
 
 // 采一次温湿度并写进界面状态。
@@ -443,6 +536,11 @@ void printBootReport() {
   Serial.printf("battery : %s, %d%%\n", battery::ready() ? "ready" : "MISSING",
                 g_state.batteryPct);
   Serial.printf("wifi    : %s, ssid=%s\n", netwifi::stateName(), netwifi::ssid());
+  Serial.printf("time    : source=%s, rtc=%s, synced=%s\n", timesync::sourceName(),
+                timesync::rtcPresent() ? "present" : "MISSING",
+                timesync::synced() ? "yes" : "no");
+  Serial.printf("clock   : %04d-%02d-%02d %02d:%02d:%02d wd=%d\n", g_state.year, g_state.month,
+                g_state.day, g_state.hour, g_state.minute, g_state.second, g_state.weekday);
   Serial.printf("contrast: level %u/%u (%u)\n", (unsigned)(g_contrastIdx + 1),
                 (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[g_contrastIdx]);
   Serial.println("========================================");
@@ -507,6 +605,15 @@ void setup() {
   netwifi::begin();
   g_lastWifiMs = millis();
   syncWifiToState();
+
+  // ---- M2 第 5 步：时钟链路 ----
+  // begin() 只读 RTC，不发 NTP —— 联网校时在 loop 里由 timesync::tick() 异步推进。
+  // 它会把 workclock 覆盖成 RTC 里的真实时间；RTC 不可信时保持 fillFakeData 的占位，
+  // 屏上照常走秒，但 timesync::synced() 是 false，boot report 里能看出来。
+  timeSelfTest();  // 先验表，再读表 —— 表错的时候后面的结果都不值得看
+  timesync::begin();
+  g_lastTimeSource = timesync::source();
+  syncClockToState();
 
   printBootReport();
 
@@ -603,6 +710,15 @@ void loop() {
   if (cfg::kWifiDropTestMs > 0 && !g_dropTestDone && millis() >= cfg::kWifiDropTestMs) {
     g_dropTestDone = true;
     netwifi::debugDropLink();
+  }
+
+  // 时间源调度：非阻塞。联网后自动发起 SNTP，成功即写回 RTC；
+  // 之后每 24 小时重校一次（RTC 的日累积误差要靠它压住）。
+  timesync::tick();
+  if (timesync::source() != g_lastTimeSource) {
+    g_lastTimeSource = timesync::source();
+    syncClockToState();
+    g_dirty = true;
   }
 
   if (g_dirty) {
