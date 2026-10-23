@@ -56,3 +56,8 @@ __pycache__/
 # 注意必须写全路径前缀：这条规则只覆盖 rlcd-workbench 一个项目，
 # status-oled3/docs/ 与 pet-oled3/docs/ 是已入库的项目文档，不受影响。
 /rlcd-workbench/docs/
+
+# rlcd-workbench 专用的 PlatformIO core 目录目前放在仓库外
+# （C:/Users/EmoBS/.platformio-rlcd，见它的 platformio.ini 的 [platformio] 段），
+# 规则留着是防以后有人把它挪回项目里。装完之后单目录超过 5 GB。
+/rlcd-workbench/.pio-core-rlcd/
