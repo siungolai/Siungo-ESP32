@@ -143,6 +143,15 @@ constexpr uint32_t kSnapshotBackoffMaxMs = 120000;
 constexpr uint32_t kHttpTimeoutMs = 8000;
 constexpr uint32_t kHttpResponseMax = 1024;   // 与 status-oled3 一致；超了就是契约坏了
 
+// ---- 待办与行程（M3，ADR-0006）----
+// 5 分钟一次：这份文档只在有人 ssh 上去改源文件时才变，比 CPU 读数冷得多。
+// 停更阈值给到 10 分钟，是为了「错过一轮 cron」不至于立刻在屏上报停更 ——
+// cron 每 5 分钟跑一次，错过一次是 5 分钟，给 2 倍余量正好。
+constexpr const char *kTodoPath = "/status/todo.json";
+constexpr uint32_t kTodoPollMs = 300000;
+constexpr uint32_t kTodoStaleMs = 600000;
+constexpr uint32_t kTodoBackoffMaxMs = 1200000;
+
 // ---- 时序 ----
 constexpr uint32_t kBootKeyIgnoreMs = 1000;  // 上电后丢弃 BOOT 事件的窗口
 constexpr uint32_t kHpmSettleMs = 100;       // 切 HPM 后等画面稳定再写（自定值，待实测校正）

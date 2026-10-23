@@ -165,9 +165,14 @@ void drawHeader(U8G2 *g, const AppState &s, bool showTime) {
   x -= 13 + 6;
   battery(g, x - 19, 8, s.batteryPct);
   x -= 19 + 6;
-  int undone = s.todoTotal - s.todoDone;
-  if (undone < 0) undone = 0;
-  snprintf(buf, sizeof(buf), "待办%d", undone);
+  if (!s.todoHasData) {
+    // 「还没拿到」不能画成「0 条待办」——那是在断言一件还不知道的事。
+    snprintf(buf, sizeof(buf), "待办—");
+  } else {
+    int undone = s.todoTotal - s.todoDone;
+    if (undone < 0) undone = 0;
+    snprintf(buf, sizeof(buf), "待办%d", undone);
+  }
   textRight(g, x, 18, buf);
 
   hline(g, 0, cfg::kHeaderH, cfg::kLcdWidth);
@@ -196,6 +201,29 @@ bool footerNote(const AppState &s, char *buf, size_t cap) {
   return true;
 }
 
+bool todoNote(const AppState &s, char *buf, size_t cap) {
+  if (!s.todoHasData) {
+    snprintf(buf, cap, "无数据");
+    return true;
+  }
+  if (s.todoBad) {
+    snprintf(buf, cap, "待办数据异常");
+    return true;
+  }
+  if (s.todoStale) {
+    snprintf(buf, cap, "停更");
+    return true;
+  }
+  // 屏上只有 6 行。未完成多于 6 条时，页首那个数字会大于眼睛能数到的行数，
+  // 不解释一句就成了 bug。多出来的条数写在这里。
+  const int undone = (s.todoTotal > s.todoDone) ? (s.todoTotal - s.todoDone) : 0;
+  if (undone > cfg::kTodoSlots) {
+    snprintf(buf, cap, "+%d", undone - cfg::kTodoSlots);
+    return true;
+  }
+  return false;
+}
+
 void drawFooter(U8G2 *g, const AppState &s) {
   hline(g, 0, cfg::kContentBottom, cfg::kLcdWidth);
   g->setFont(F_CN);
@@ -208,11 +236,10 @@ void drawFooter(U8G2 *g, const AppState &s) {
   // 中段只在「需要解释」的时候才出声：没数据 / 停更 / 断网。
   // 正常时页尾保持安静 —— 一个每秒都在变的页脚会让人以为出了什么事。
   // 龄期用设备单调时钟算（ADR-0009），不用快照里的 generated_at。
-  if (s.panel != 1) {
-    return;
-  }
   char mid[24];
-  if (footerNote(s, mid, sizeof(mid))) {
+  const bool has = (s.panel == 0) ? todoNote(s, mid, sizeof(mid))
+                                  : footerNote(s, mid, sizeof(mid));
+  if (has) {
     textCenter(g, cfg::kLcdWidth / 2, cfg::kContentBottom + 16, mid);
   }
 }
@@ -280,17 +307,25 @@ void drawTodos(U8G2 *g, const AppState &s) {
   g->setFont(F_CN);
   g->setDrawColor(INK);
 
+  // 还没拿到数据时不能写「无待办」——那是把「不知道」说成了「没有」。
+  if (!s.todoHasData) {
+    text(g, cfg::kCalLeft, cfg::kTodoTop + 11, "—");
+    return;
+  }
   if (s.todoTotal == 0) {
     text(g, cfg::kCalLeft, cfg::kTodoTop + 11, "无待办");
     return;
   }
 
   for (int i = 0; i < cfg::kTodoSlots; ++i) {
+    if (s.todos[i].text[0] == '\0') {
+      continue;  // 空槽不占行
+    }
     const int y0 = cfg::kTodoTop + i * cfg::kTodoPitch;
-    // 勾选框 7x7
-    const bool done = i < s.todoDone;
+    // 勾选框恒为空：契约里只有「已完成几条」这个总数，没有逐条标记。
+    // 槽位里装的全是未完成条目（服务器按 due 排序、已完成不占槽），
+    // 所以这里画满格等于编造一个设备根本没有的事实。
     box(g, cfg::kCalLeft, y0 + 1, 7, 7);
-    if (done) fill(g, cfg::kCalLeft + 2, y0 + 3, 3, 3);
 
     text(g, cfg::kCalLeft + 12, y0 + 10, s.todos[i].text);
     if (s.todos[i].due[0] != '\0') {
@@ -445,6 +480,10 @@ namespace ui {
 
 bool serverFooterNote(const AppState &s, char *buf, size_t cap) {
   return footerNote(s, buf, cap);
+}
+
+bool todoFooterNote(const AppState &s, char *buf, size_t cap) {
+  return todoNote(s, buf, cap);
 }
 
 void touchFonts() {

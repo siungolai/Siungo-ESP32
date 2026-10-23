@@ -21,6 +21,7 @@
 #include "snapshot.h"
 #include "timesync.h"
 #include "timeutil.h"
+#include "todo.h"
 #include "tz.h"
 #include "ui.h"
 #include "net_wifi.h"
@@ -371,16 +372,18 @@ bool syncServerToState() {
 
     // 把页尾那句话原样打进串口。A2 的「断网/停更时页尾出现龄期」是视觉断言，
     // 没有这行日志就只能靠肉眼看屏 —— 而肉眼看屏没法进自动化、也没法回放。
-    static char lastNote[24] = {};
-    char note[24];
-    if (ui::serverFooterNote(g_state, note, sizeof(note))) {
-      if (strcmp(note, lastNote) != 0) {
-        logLine("[ui] footer srv: \"%s\"", note);
-        snprintf(lastNote, sizeof(lastNote), "%s", note);
-      }
-    } else if (lastNote[0] != '\0') {
-      logLine("[ui] footer srv: (empty)");
-      lastNote[0] = '\0';
+    // 日志一律 ASCII（仓库约定），所以这里打的是与屏上一一对应的标签，
+    // 不是屏上那句中文原文。原因不只是风格：Serial 用 setTxTimeoutMs(0)
+    // 之后缓冲区满会**丢字节**，而一个丢字节的 UTF-8 汉字会变成乱码，
+    // 读日志的人会以为设备在输出垃圾。ASCII 丢一个字节顶多糊一个字符。
+    const char *tag = !g_state.serverHasData ? "no-data"
+                      : (g_state.wifi != WIFI_ON) ? "offline"
+                      : g_state.serverStale      ? "stale"
+                                                 : "ok";
+    static char lastTag[16] = {};
+    if (strcmp(tag, lastTag) != 0) {
+      logLine("[ui] footer srv: %s", tag);
+      snprintf(lastTag, sizeof(lastTag), "%s", tag);
     }
   }
 
@@ -474,6 +477,88 @@ void runThermalProbe() {
     delay(50);
   }
   logLine("[therm] probe done, %u samples", n);
+}
+
+// 把 todo::Data 投影到 AppState。返回 true 表示真有东西变了，需要重画。
+//
+// 相对到期串（「2h」/「明天」/「逾期」）在这里换算，因为它依赖当前时间，
+// 而 todo 模块只负责取数、不知道屏幕上的钟走到哪儿。换算结果的比较用
+// strcmp：每分钟最多变一次，不会把面板一从 LPM 里一秒一拽。
+bool syncTodoToState() {
+  const todo::Data &d = todo::data();
+  bool changed = false;
+
+  const bool hasData = d.valid;
+  const bool staleNow = todo::stale();
+  if (g_state.todoHasData != hasData || g_state.todoStale != staleNow ||
+      g_state.todoTotal != d.total || g_state.todoDone != d.done) {
+    g_state.todoHasData = hasData;
+    g_state.todoStale = staleNow;
+    g_state.todoTotal = d.total;
+    g_state.todoDone = d.done;
+    changed = true;
+  }
+
+  // 槽位正文 + 相对到期。到期串格式非法时只清掉这一行的到期，正文照常显示，
+  // 并把这一行计进 todoBad —— A3 要求「只跳过这一条、其余五条照常」。
+  int badRows = d.badRows;
+  for (int i = 0; i < cfg::kTodoSlots; ++i) {
+    char rel[8] = {};
+    if (d.due[i][0] != '\0') {
+      if (!todo::relativeDue(d.due[i], g_state.year, g_state.month, g_state.day,
+                             g_state.hour, g_state.minute, rel, sizeof(rel))) {
+        ++badRows;
+        rel[0] = '\0';
+      }
+    }
+    if (strcmp(g_state.todos[i].text, d.text[i]) != 0 ||
+        strcmp(g_state.todos[i].due, rel) != 0) {
+      snprintf(g_state.todos[i].text, sizeof(g_state.todos[i].text), "%s", d.text[i]);
+      snprintf(g_state.todos[i].due, sizeof(g_state.todos[i].due), "%s", rel);
+      changed = true;
+    }
+  }
+  const bool badNow = hasData && (badRows > 0);
+  if (g_state.todoBad != badNow) {
+    g_state.todoBad = badNow;
+    changed = true;
+    logLine("[todo] %d bad row(s) - those rows keep their text but drop the due", badRows);
+  }
+
+  // 行程点：daysMonth 是「这份 days 属于哪个月」，月份对不上就一个点都不标。
+  int monthKey = 0;
+  if (d.daysMonth[0] != '\0') {
+    int y = 0, m = 0;
+    if (sscanf(d.daysMonth, "%d-%d", &y, &m) == 2) {
+      monthKey = y * 100 + m;
+    }
+  }
+  if (g_state.tripMonthKey != monthKey) {
+    g_state.tripMonthKey = monthKey;
+    changed = true;
+  }
+  if (memcmp(g_state.tripCount, d.tripCount, sizeof(g_state.tripCount)) != 0) {
+    memcpy(g_state.tripCount, d.tripCount, sizeof(g_state.tripCount));
+    changed = true;
+  }
+
+  // 页尾那句话也打进串口，理由与 serverFooterNote 相同：视觉断言要有取证手段。
+  // 同样是 ASCII 标签而不是屏上那句中文，理由见上面 server 那段。
+  const int undoneNow = (g_state.todoTotal > g_state.todoDone)
+                            ? (g_state.todoTotal - g_state.todoDone)
+                            : 0;
+  const char *tag = !g_state.todoHasData       ? "no-data"
+                    : g_state.todoBad          ? "bad-rows"
+                    : g_state.todoStale        ? "stale"
+                    : (undoneNow > cfg::kTodoSlots) ? "plus-n"
+                                                   : "ok";
+  static char lastTag[16] = {};
+  if (strcmp(tag, lastTag) != 0) {
+    logLine("[ui] footer todo: %s (undone=%d)", tag, undoneNow);
+    snprintf(lastTag, sizeof(lastTag), "%s", tag);
+  }
+
+  return changed;
 }
 
 void fillFakeData() {
@@ -624,7 +709,12 @@ void handleBoot(Gesture gs) {
   noteActivity();
   switch (gs) {
     case Gesture::Short:
-      logLine("[boot] refresh data + repaint");
+      // 文档里这一格写的是「立即拉数据并重绘」，所以它必须真的去拉 ——
+      // 只置脏的话，改了服务器上的源文件还得等下一个 5 分钟轮询，
+      // 而「按一下就同步」正是 A3 用来验证契约的那一下。
+      logLine("[boot] force refresh: snapshot + todo");
+      snapshot::requestRefresh();
+      todo::requestRefresh();
       g_dirty = true;
       break;
     case Gesture::Long:
@@ -726,7 +816,7 @@ void printBootReport() {
   Serial.println();
   Serial.println("========================================");
   Serial.println("project : rlcd-workbench");
-  Serial.println("stage   : M2 boot (i2c + shtc3 + battery + wifi)");
+  Serial.println("stage   : M3 boot (i2c + shtc3 + battery + wifi + server + todo)");
   Serial.println("----------------------------------------");
   Serial.printf("reset   : %s\n", resetReasonName(esp_reset_reason()));
   Serial.printf("chip    : %s rev %d\n", ESP.getChipModel(), (int)ESP.getChipRevision());
@@ -847,6 +937,11 @@ void setup() {
   snapshot::begin();
   syncServerToState();
 
+  // 待办：先同步取一次，让首帧就是真数据（或者明确的「还没拿到」），
+  // 而不是先画一拍假数据再改。
+  todo::begin();
+  syncTodoToState();  // 首帧就是「还没拿到」，不是先画一拍假数据
+
   printBootReport();
 
   const uint32_t t0 = millis();
@@ -945,7 +1040,13 @@ void loop() {
   if (millis() - g_lastWifiMs >= cfg::kWifiTickMs) {
     g_lastWifiMs = millis();
     netwifi::tick();
-    syncWifiToState();  // 变了才置脏
+    if (syncWifiToState()) {
+      // WiFi 刚连上（或刚掉）时立刻补一次远端数据。
+      // 不这么做的话，开机那一次必然失败的请求会把周期推到下一个退避档，
+      // 于是「网早就通了，数据还没来」会持续好几分钟。
+      snapshot::requestRefresh();
+      todo::requestRefresh();
+    }
   }
 
   // bringup 开关：验证重连链用，正常固件 kWifiDropTestMs = 0 永不触发。
@@ -965,6 +1066,11 @@ void loop() {
 
   // 服务器快照：非阻塞，联网后每 15 秒拉一次。失败不清旧数据 ——
   // 屏上宁可显示「42 秒前的读数 + 停更标记」，也不要一片空白。
+  todo::tick();
+  if (syncTodoToState()) {
+    g_dirty = true;
+  }
+
   snapshot::tick();
   if (syncServerToState()) {
     g_dirty = true;

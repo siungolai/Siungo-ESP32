@@ -61,10 +61,11 @@ location /status/ {
     root /var/www;
     autoindex off;
 
-    # Whitelist by name, not by extension: only the two files the device
-    # actually reads. `^/status/.+\.json$` would serve any future .json
-    # dropped into the directory.
-    location ~ ^/status/(snapshot|mailbox)\.json$ {
+    # Whitelist by name, not by extension: only the three files the devices
+    # actually read. `^/status/.+\.json$` would serve any future .json
+    # dropped into the directory. Adding one here AND writing it under
+    # /var/www/status/ are the two halves of publishing a new document.
+    location ~ ^/status/(snapshot|mailbox|todo)\.json$ {
         if ($status_ok = 0) { return 403; }
 
         try_files $uri =404;
@@ -113,6 +114,17 @@ MAILTO=""
 #              不能把第三方主机名＋非标端口写死在文件里。不设则该字段为 null，
 #              设备端画「?」（没配）而不是红叉（挂了）。
 */5 * * * * /usr/bin/python3 /usr/local/bin/status-mailbox.py
+*/5 * * * * /usr/bin/python3 /usr/local/bin/status-todo.py
+
+# status-todo.py reads a HAND-EDITED source file, not the system. Point it
+# somewhere an operator can reach over ssh and cron can read as root:
+#
+#   install -d -m 755 /var/lib/status-todo
+#   install -m 644 /dev/null /var/lib/status-todo/source.json   # then edit it
+#
+# The path is env-overridable (STATUS_TODO_SOURCE) for off-server self-tests.
+# Five minutes, not one: this document only changes when a human edits it, and
+# a stale todo list is far less interesting than a stale CPU reading.
 
 # ---------------------------------------------------------------------------
 # 4. post-deploy gate: status-check.py
@@ -123,8 +135,10 @@ MAILTO=""
 # gate turns that into a non-zero exit at deploy time.
 #
 #   python3 /usr/local/bin/status-check.py /var/www/status/snapshot.json \
-#                                        /var/www/status/mailbox.json
+#                                        /var/www/status/mailbox.json \
+#                                        /var/www/status/todo.json
 #
-# Run it after every deploy AND after every edit to either collector. Field
+# Run it after every deploy AND after every edit to any collector. Field
 # changes must be made in three places at once (docs/adr/0012 section 5):
-# the ADR table, status-snapshot.py's FIELDS, and status-check.py's REQUIRED.
+# the ADR table, the collector's FIELDS (status-snapshot.py / status-todo.py),
+# and status-check.py's REQUIRED.

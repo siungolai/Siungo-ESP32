@@ -1,4 +1,4 @@
-# 12. M1b 服务器侧 JSON 字段契约（snapshot / mailbox）
+# 12. M1b 服务器侧 JSON 字段契约（snapshot / mailbox / todo）
 
 日期：2026-10-17
 
@@ -15,13 +15,14 @@
 | `status-oled3/docs/server/status-snapshot.py` | 每分钟采集 22 个字段，原子写 `/var/www/status/snapshot.json` |
 | `status-oled3/docs/server/status-mailbox.py` | 每 5 分钟查 IMAP，原子写 `/var/www/status/mailbox.json` |
 | `status-oled3/docs/server/nginx-and-cron.md` | nginx `location` + `status-key.conf` + crontab 三段的脱敏模板 |
+| `status-oled3/docs/server/status-todo.py` | 每 5 分钟把人工维护的待办源文件归一成 17 字段，原子写 `/var/www/status/todo.json`（rlcd-workbench 用，字段语义见 `../../../rlcd-workbench/docs/adr/0006-flat-todo-contract-on-shared-monitor-key.md`） |
 | `status-oled3/docs/server/status-check.py` | 部署前字段契约校验器 |
 
 但有一件事 ADR-0008 没有覆盖，而它决定了设备侧固件怎么写：**这些 JSON 的字段名与字段类型必须冻结**。设备侧的取值器是手写的扁平解析器（[ADR-0010](0010-hand-written-json-value-extractor.md)），它只认「带引号的字符串」和「数字」，没有数组、没有布尔、没有嵌套对象。字段一旦在服务器侧改名或改类型，设备侧不会有任何报错，只会永远显示 `-`——这正是 ADR-0008 引以为戒的 `photo-cleanup.sh 静默失败 34 天` 同一类故障（症状从「日志空」变成「屏幕恒为 -」）。
 
 ## 决策
 
-### 1. 两份文档的字段清单冻结如下
+### 1. 三份文档的字段清单冻结如下
 
 `snapshot.json`（22 个字段，`status-oled3/docs/server/status-snapshot.py` 的 `FIELDS` 常量即此清单的机器可读副本）：
 
@@ -59,6 +60,24 @@
 | `unread` | int 或 null | 跨账号未读总数；任一账号失败即 null |
 | `account_count` | int | 已配置账号数 |
 | `failed_count` | int | 本轮失败账号数 |
+
+#### `todo.json`（17）
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `generated_at` | string | 归一化时刻，ISO8601 带 `Z` |
+| `total` | int | 有效待办总数（**可以大于 6**，屏上只显示前 6 条） |
+| `done` | int | 其中已完成数；页首显示 `total - done` |
+| `item1_text` … `item6_text` | string | 第 N 条正文，**已裁到 12 个字符**；空槽是空串 |
+| `item1_due` … `item6_due` | string | 第 N 条到期，`YYYY-MM-DD HH:MM`；**原样透传，不校验**（见下） |
+| `days_month` | string | 行程所属月份 `YYYY-MM` |
+| `days` | string | 当月行程分布，`日:条数` 逗号分隔，如 `22:2,24:1`；无行程为空串 |
+
+两条与其余文档不同的约定，都是刻意的：
+
+> 📌 **正文裁剪在服务器侧做，到期串不校验。** 裁剪是显示契约（右栏内宽 192 px 算出来的 12 字，见 ADR-0006），服务器知道得最准；而 `itemN_due` 是**原样透传**，坏格式也照发——设备侧本来就必须容错任何线上垃圾，而 A3 断言要求「某一条 `due` 非法 → 只跳过这一条、其余五条照常显示、页尾标异常」。在服务器侧洗掉它，这条路径就永远测不到了。
+
+> 📌 **源文件缺失或不可解析时脚本拒绝发布**（记日志、退出码非零、旧 `todo.json` 原样保留）。发一份全零文档会在屏上渲染成「没有待办」——和真的没有待办长得一样，而它是错的；保留旧文件则让设备把它老化到「停更」，那是实情。
 
 ### 2. 类型只允许三种：字符串、数字、null
 
@@ -98,7 +117,7 @@ python3 /usr/local/bin/status-check.py /var/www/status/snapshot.json \
 
 **2026-10-23 扩到 22 字段后复验**（同一台机器）：`--selftest` 输出 22 字段、`status-check.py` 报 `OK ... 22 fields, 423/1024 bytes`、exit 0；`py_compile` 两个脚本均通过。
 
-### 5. 字段清单的两份拷贝必须一起改
+### 5. 字段清单的多份拷贝必须一起改
 
 `status-snapshot.py` 的 `FIELDS` 常量、本 ADR 的表格、`status-check.py` 的 `REQUIRED`，三处描述同一份契约。**任何一次字段增删改，三处必须同步**，否则校验器会放过设备读不到的新字段——这比没有校验器更坏。
 

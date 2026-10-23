@@ -3,9 +3,10 @@
 
 The device decides "is this usable data" from three facts (docs/adr/0004):
 HTTP 200, the body parses as JSON, and the expected fields are present. This
-script checks the second and third facts for BOTH documents without needing
+script checks the second and third facts for EVERY document without needing
 the server or the device, so the field contract can be verified before either
-side is touched.
+side is touched. `snapshot.json` and `mailbox.json` come from
+status-oled3; `todo.json` comes from rlcd-workbench (status-todo.py).
 
 Usage:
 
@@ -17,7 +18,8 @@ first failure, which makes it usable as a pre-deploy gate:
 
     scp snapshot.json ...
     python3 status-check.py /var/www/status/snapshot.json \
-                             /var/www/status/mailbox.json
+                             /var/www/status/mailbox.json \
+                             /var/www/status/todo.json
 
 Why this exists: the device's parser is a hand-written flat reader
 (src/jsonfield.cpp, docs/adr/0010). It has no error messages. If a field is
@@ -50,6 +52,20 @@ REQUIRED = {
     "mailbox.json": [
         "generated_at", "available", "unread",
         "account_count", "failed_count",
+    ],
+    # rlcd-workbench (docs/adr/0006). Six fixed slots plus five scalars. An
+    # empty slot is an empty string, never an omitted key -- the device judges
+    # the whole document by "are all fields here", so one missing key blanks
+    # the panel instead of one row.
+    "todo.json": [
+        "generated_at", "total", "done",
+        "item1_text", "item1_due",
+        "item2_text", "item2_due",
+        "item3_text", "item3_due",
+        "item4_text", "item4_due",
+        "item5_text", "item5_due",
+        "item6_text", "item6_due",
+        "days_month", "days",
     ],
 }
 
@@ -84,7 +100,12 @@ def check(path):
         return None
 
     try:
-        with open(path) as fh:
+        # encoding= must be explicit. The documents carry Chinese (todo.json
+        # text fields), and on a machine whose default text encoding is not
+        # UTF-8 the plain open() fails with a confusing codec error instead of
+        # reading the file. The server happens to default to UTF-8; the
+        # deploy-time self-test may not.
+        with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
     except (OSError, ValueError) as exc:
         print("FAIL %s: %s" % (path, exc))
@@ -111,7 +132,14 @@ def check(path):
     # Size, measured the way the firmware measures it: the compact bytes that
     # emit() writes, newline included. Warn at 90% of the budget so there is
     # room to notice before the document actually stops fitting.
-    serialised = json.dumps(doc, separators=(",", ":")).encode() + b"\n"
+    # ensure_ascii=False matters now that a document carries Chinese. Without
+    # it json.dumps escapes every CJK glyph to \uXXXX, and the measured size
+    # overstates what the device receives by ~20% (measured 2026-10-23:
+    # todo.json 472 real bytes measured as 556). Conservative in the safe
+    # direction, but it is not the number the firmware sees, and a false
+    # "close to the limit" warning is worse than no warning.
+    serialised = json.dumps(doc, ensure_ascii=False,
+                            separators=(",", ":")).encode("utf-8") + b"\n"
     size_note = "%d/%d bytes" % (len(serialised), DEVICE_BUFFER_BYTES)
     if len(serialised) >= DEVICE_BUFFER_BYTES:
         problems.append("body does not fit the device buffer: %s" % size_note)

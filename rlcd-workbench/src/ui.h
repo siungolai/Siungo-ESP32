@@ -80,6 +80,13 @@ struct AppState {
   bool serverHasData = false;
   bool serverStale = false;
   uint32_t serverAgeSec = 0;
+
+  // 待办三态与服务器面板同构：「还没拿到」「拿到了」「拿到了但有坏行」必须
+  // 分得开。没有 todoHasData 的话，首次上电会显示「无待办」——那不是未知，
+  // 那是在断言一件还不知道的事。
+  bool todoHasData = false;
+  bool todoStale = false;
+  bool todoBad = false;
 };
 
 namespace ui {
@@ -104,6 +111,10 @@ void secondsRect(int *x, int *y, int *w, int *h);
 // 正常时返回 false，页尾保持安静。抽成函数是为了让主循环能把同一句话打进
 // 串口 —— 否则「屏上到底该显示什么」只能靠肉眼看屏，没法在自动化里证明。
 bool serverFooterNote(const AppState &s, char *buf, size_t cap);
+
+// 面板一页尾中段：拿不到 / 停更 / 有坏行 / 未完成超过 6 条（`+N`）。
+// 正常时返回 false，页尾保持安静。
+bool todoFooterNote(const AppState &s, char *buf, size_t cap);
 
 // 把 UI 用到的那几个字库显式引用一遍，保证 linker 不会因为
 // section 回收把没被直接点名的字库丢掉。
