@@ -15,9 +15,17 @@ struct TodoItem {
   char due[16];
 };
 
+// 探针三态。少了 Unknown，字段还没部署时六个格子会全画成叉 ——
+// 「这一项还没接」和「这一项挂了」在屏上必须长得不一样。
+enum ProbeState : uint8_t {
+  PROBE_UNKNOWN = 0,  // 字段缺失或为 null：画空心框 + 问号
+  PROBE_OK = 1,       // 黑底白勾
+  PROBE_FAIL = 2,     // 空心框 + 叉
+};
+
 struct Probe {
   const char *label;
-  bool ok;
+  ProbeState state;
 };
 
 enum WifiState : uint8_t {
@@ -47,7 +55,7 @@ struct AppState {
   int tripMonthKey = 202610;           // yyyymm，用来防「换月瞬间标错月份」
   uint8_t tripCount[32] = {};          // 索引 1..31
 
-  Probe probes[4] = {};  // 面板二右栏的前 4 行
+  Probe probes[7] = {};  // 面板二右栏：六个服务探针 + 证书单独占一行
   int probeCount = 0;
   int cpuPct = 23;
   int memPct = 71;
@@ -55,7 +63,23 @@ struct AppState {
   float load1 = 0.42f;
   char memDetail[32] = "1229M/453M/1682M";
   char diskDetail[32] = "21.4G/18.6G/40.0G";
+
+  // 哪些行是真的有值。没置位的画「—」而不是画一个看起来像真数据的 0 ——
+  // 「服务器还没回话」和「CPU 占用 0%」在屏上不能长成一个样。
+  enum : uint8_t {
+    KN_CPU = 1 << 0,
+    KN_MEM = 1 << 1,
+    KN_DISK = 1 << 2,
+    KN_LOAD = 1 << 3,
+    KN_CERT = 1 << 4,
+  };
+  uint8_t known = 0;
   int certDays = 74;
+
+  // 服务器数据的新鲜度：页尾要能说出「数据是 42 秒前的」。
+  bool serverHasData = false;
+  bool serverStale = false;
+  uint32_t serverAgeSec = 0;
 };
 
 namespace ui {

@@ -105,6 +105,18 @@ constexpr uint32_t kResyncIntervalMs = 24u * 60u * 60u * 1000u;
 constexpr uint32_t kNtpWaitTimeoutMs = 20000;      // 发起 SNTP 后最多等这么久
 constexpr int64_t kTimeSanityEpoch = 1700000000;   // 2023-11-15，低于它说明系统时间还没设
 
+// ---- 服务器快照 ----
+// 契约冻结在 status-oled3/docs/adr/0012；本项目议定扩到 22 字段（加 svc_select /
+// svc_wb / svc_ma12，见 ADR-0014）。设备端按字段名取值，不建偏移表。
+constexpr const char *kDataHost = "www.siungo.top";
+constexpr const char *kSnapshotPath = "/status/snapshot.json";
+constexpr const char *kMonitorKeyHeader = "X-Monitor-Key";
+
+constexpr uint32_t kSnapshotPollMs = 15000;   // 轮询间隔
+constexpr uint32_t kSnapshotStaleMs = 60000;  // 超过这么久没更新就算「停更」
+constexpr uint32_t kHttpTimeoutMs = 8000;
+constexpr uint32_t kHttpResponseMax = 1024;   // 与 status-oled3 一致；超了就是契约坏了
+
 // ---- 时序 ----
 constexpr uint32_t kBootKeyIgnoreMs = 1000;  // 上电后丢弃 BOOT 事件的窗口
 constexpr uint32_t kHpmSettleMs = 100;       // 切 HPM 后等画面稳定再写（自定值，待实测校正）

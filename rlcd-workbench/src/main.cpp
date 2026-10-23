@@ -17,6 +17,7 @@
 #include "input.h"
 #include "rlcd.h"
 #include "shtc3.h"
+#include "snapshot.h"
 #include "timesync.h"
 #include "timeutil.h"
 #include "tz.h"
@@ -340,6 +341,91 @@ bool syncWifiToState() {
   return true;
 }
 
+// 把快照投影到界面状态。返回是否变了（变了才置脏）。
+//
+// 变了的判定不能拿指针比，也不能每次都置脏 —— 面板二从 LPM 醒来重画一帧要
+// 先切 HPM 再等 100 ms，为了一个没变的数字付这个代价不值。
+bool syncServerToState() {
+  const snapshot::Data &d = snapshot::data();
+  bool changed = false;
+
+  // 新鲜度先算：即使数值没变，龄期跨过一个整秒也可能要重画页尾。
+  const bool hasData = d.valid;
+  const uint32_t ageSec = hasData ? snapshot::ageMs() / 1000 : 0;
+  const bool staleNow = snapshot::stale();
+  if (g_state.serverHasData != hasData || g_state.serverStale != staleNow ||
+      g_state.serverAgeSec != ageSec) {
+    g_state.serverHasData = hasData;
+    g_state.serverStale = staleNow;
+    g_state.serverAgeSec = ageSec;
+    changed = true;
+  }
+
+  if (!hasData) {
+    return changed;
+  }
+
+  uint8_t mask = 0;
+  if (d.hasCpu) {
+    mask |= AppState::KN_CPU;
+    if (g_state.cpuPct != d.cpuPct) {
+      g_state.cpuPct = d.cpuPct;
+      changed = true;
+    }
+  }
+  if (d.hasMem) {
+    mask |= AppState::KN_MEM;
+    if (g_state.memPct != d.memPct || strcmp(g_state.memDetail, d.memDetail) != 0) {
+      g_state.memPct = d.memPct;
+      snprintf(g_state.memDetail, sizeof(g_state.memDetail), "%s", d.memDetail);
+      changed = true;
+    }
+  }
+  if (d.hasDisk) {
+    mask |= AppState::KN_DISK;
+    if (g_state.diskPct != d.diskPct || strcmp(g_state.diskDetail, d.diskDetail) != 0) {
+      g_state.diskPct = d.diskPct;
+      snprintf(g_state.diskDetail, sizeof(g_state.diskDetail), "%s", d.diskDetail);
+      changed = true;
+    }
+  }
+  if (d.hasLoad) {
+    mask |= AppState::KN_LOAD;
+    if (g_state.load1 != d.load1) {
+      g_state.load1 = d.load1;
+      changed = true;
+    }
+  }
+  if (d.hasCert) {
+    mask |= AppState::KN_CERT;
+    if (g_state.certDays != d.certDays) {
+      g_state.certDays = d.certDays;
+      changed = true;
+    }
+  }
+  if (g_state.known != mask) {
+    g_state.known = mask;
+    changed = true;
+  }
+
+  const snapshot::Probe probes[6] = {d.svcWeb,  d.svcSelect, d.svcWb,
+                                    d.svcApi,  d.svcUpload, d.svcMa12};
+  for (int i = 0; i < 6; ++i) {
+    ProbeState want = PROBE_UNKNOWN;
+    if (probes[i] == snapshot::Probe::Ok) {
+      want = PROBE_OK;
+    } else if (probes[i] == snapshot::Probe::Fail) {
+      want = PROBE_FAIL;
+    }
+    if (g_state.probes[i].state != want) {
+      g_state.probes[i].state = want;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
 // 自发热诊断：停掉一切重绘，静置 kThermalProbeMs，定期记录两种温度。
 //
 // 为什么要做这件事：SHTC3 读到 35 °C，而 SoC 结温 36 °C 也跟着走 —— 两者贴得
@@ -412,11 +498,19 @@ void fillFakeData() {
   g_state.tripCount[27] = 3;
   g_state.tripCount[30] = 1;
 
-  g_state.probeCount = 4;
-  g_state.probes[0] = {"www.siungo.top", true};
-  g_state.probes[1] = {"select.siungo.top", true};
-  g_state.probes[2] = {"api/photos", false};
-  g_state.probes[3] = {"api/health", true};
+  // 面板二在拿到第一份快照前是「还不知道」，不是「全是 0」也不是「全是叉」。
+  // 所以这里只摆好六行的标签，状态统一 Unknown，known 位一个都不置。
+  g_state.probeCount = 6;
+  g_state.probes[0] = {"www.siungo.top", PROBE_UNKNOWN};
+  g_state.probes[1] = {"select.siungo.top", PROBE_UNKNOWN};
+  g_state.probes[2] = {"wb.siungo.top", PROBE_UNKNOWN};
+  g_state.probes[3] = {"api/photos", PROBE_UNKNOWN};
+  g_state.probes[4] = {"api/health", PROBE_UNKNOWN};
+  g_state.probes[5] = {"<tcp-host>:<port>", PROBE_UNKNOWN};
+  g_state.known = 0;
+  g_state.serverHasData = false;
+  g_state.serverStale = false;
+  g_state.serverAgeSec = 0;
 }
 
 // 需要省电时先切 HPM 再写，写完按空闲计时切回 LPM。
@@ -615,6 +709,12 @@ void setup() {
   g_lastTimeSource = timesync::source();
   syncClockToState();
 
+  // ---- M2 第 6 步：服务器快照 ----
+  // 只挂上，不在 setup 里阻塞等 —— 第一份数据在 loop 里由 tick() 拉，
+  // 拉回来之前面板二显示的是「还不知道」（空心问号），不是「全挂了」。
+  snapshot::begin();
+  syncServerToState();
+
   printBootReport();
 
   const uint32_t t0 = millis();
@@ -718,6 +818,13 @@ void loop() {
   if (timesync::source() != g_lastTimeSource) {
     g_lastTimeSource = timesync::source();
     syncClockToState();
+    g_dirty = true;
+  }
+
+  // 服务器快照：非阻塞，联网后每 15 秒拉一次。失败不清旧数据 ——
+  // 屏上宁可显示「42 秒前的读数 + 停更标记」，也不要一片空白。
+  snapshot::tick();
+  if (syncServerToState()) {
     g_dirty = true;
   }
 

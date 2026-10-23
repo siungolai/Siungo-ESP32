@@ -95,12 +95,28 @@ void wifi(U8G2 *g, int x, int y, WifiState s) {
 void chipOk(U8G2 *g, int x, int y) {
   fill(g, x, y, 20, 17);
   g->setDrawColor(PAPER);
+  // 勾的拐点必须在**下方**：左短臂从左上斜下来，右长臂从拐点斜上去。
+  // 之前写反了 —— 拐点在上、两端在下，画出来是个「Λ」，一上板就能看出来。
+  const int vx = x + 8, vy = y + 11;
   for (int t = 0; t < 2; ++t) {
-    int px = x + 5, py = y + 9;
-    for (int i = 0; i < 4; ++i) g->drawPixel(px + i, py - i + t);
-    for (int i = 0; i < 7; ++i) g->drawPixel(px + 4 + i, py - 4 + i + t);
+    for (int i = 0; i < 4; ++i) g->drawPixel(vx - 4 + i, vy - 4 + i + t);  // 左上 → 拐点
+    for (int i = 0; i < 8; ++i) g->drawPixel(vx + i, vy - i + t);          // 拐点 → 右上
   }
   g->setDrawColor(INK);
+}
+
+void chipUnknown(U8G2 *g, int x, int y) {
+  // 虚线框 + 中间一个问号：明确表达「这一项还没接」，不是「坏了」。
+  for (int i = 0; i < 20; i += 2) {
+    g->drawPixel(x + i, y);
+    g->drawPixel(x + i, y + 16);
+  }
+  for (int i = 0; i < 17; i += 2) {
+    g->drawPixel(x, y + i);
+    g->drawPixel(x + 19, y + i);
+  }
+  g->setFont(F_CN);
+  g->drawStr(x + 7, y + 13, "?");
 }
 
 void chipFail(U8G2 *g, int x, int y) {
@@ -295,14 +311,38 @@ void drawServer(U8G2 *g, const AppState &s) {
     int pct;  // <0 表示不画进度条
   };
   Row rows[4];
-  rows[0] = {"CPU", nullptr, {0}, s.cpuPct};
-  snprintf(rows[0].value, sizeof(rows[0].value), "%d%%", s.cpuPct);
-  rows[1] = {"内存", s.memDetail, {0}, s.memPct};
-  snprintf(rows[1].value, sizeof(rows[1].value), "%d%%", s.memPct);
-  rows[2] = {"磁盘", s.diskDetail, {0}, s.diskPct};
-  snprintf(rows[2].value, sizeof(rows[2].value), "%d%%", s.diskPct);
+  const bool kCpu = (s.known & AppState::KN_CPU) != 0;
+  const bool kMem = (s.known & AppState::KN_MEM) != 0;
+  const bool kDisk = (s.known & AppState::KN_DISK) != 0;
+  const bool kLoad = (s.known & AppState::KN_LOAD) != 0;
+
+  rows[0] = {"CPU", nullptr, {0}, kCpu ? s.cpuPct : -1};
+  if (kCpu) {
+    snprintf(rows[0].value, sizeof(rows[0].value), "%d%%", s.cpuPct);
+  } else {
+    snprintf(rows[0].value, sizeof(rows[0].value), "--");
+  }
+
+  rows[1] = {"内存", kMem ? s.memDetail : nullptr, {0}, kMem ? s.memPct : -1};
+  if (kMem) {
+    snprintf(rows[1].value, sizeof(rows[1].value), "%d%%", s.memPct);
+  } else {
+    snprintf(rows[1].value, sizeof(rows[1].value), "--");
+  }
+
+  rows[2] = {"磁盘", kDisk ? s.diskDetail : nullptr, {0}, kDisk ? s.diskPct : -1};
+  if (kDisk) {
+    snprintf(rows[2].value, sizeof(rows[2].value), "%d%%", s.diskPct);
+  } else {
+    snprintf(rows[2].value, sizeof(rows[2].value), "--");
+  }
+
   rows[3] = {"负载", nullptr, {0}, -1};
-  snprintf(rows[3].value, sizeof(rows[3].value), "%.2f", (double)s.load1);
+  if (kLoad) {
+    snprintf(rows[3].value, sizeof(rows[3].value), "%.2f", (double)s.load1);
+  } else {
+    snprintf(rows[3].value, sizeof(rows[3].value), "--");
+  }
 
   for (int i = 0; i < 4; ++i) {
     const int y0 = 32 + i * 62;
@@ -321,24 +361,34 @@ void drawServer(U8G2 *g, const AppState &s) {
     }
   }
 
-  // ---- 右栏：7 行，行距 34 ----
-  for (int i = 0; i < 4 && i < s.probeCount; ++i) {
+  // ---- 右栏：7 行（六个探针 + 证书），行距 34 ----
+  for (int i = 0; i < 6 && i < s.probeCount; ++i) {
     const int y0 = 32 + i * 34;
     g->setFont(F_CN);
     text(g, cfg::kCalLeft, y0 + 11, s.probes[i].label);
-    if (s.probes[i].ok) {
-      chipOk(g, cfg::kMarginR - 19, y0 - 1);
-    } else {
-      chipFail(g, cfg::kMarginR - 19, y0 - 1);
+    switch (s.probes[i].state) {
+      case PROBE_OK:
+        chipOk(g, cfg::kMarginR - 19, y0 - 1);
+        break;
+      case PROBE_FAIL:
+        chipFail(g, cfg::kMarginR - 19, y0 - 1);
+        break;
+      default:
+        chipUnknown(g, cfg::kMarginR - 19, y0 - 1);
+        break;
     }
   }
 
   // 证书天数：74 天
-  const int y0 = 32 + 4 * 34;
+  const int y0 = 32 + 6 * 34;
   g->setFont(F_CN);
   text(g, cfg::kCalLeft, y0 + 11, "证书");
   g->setFont(F_VAL);
-  snprintf(buf, sizeof(buf), "%d", s.certDays);
+  if ((s.known & AppState::KN_CERT) != 0) {
+    snprintf(buf, sizeof(buf), "%d", s.certDays);
+  } else {
+    snprintf(buf, sizeof(buf), "--");
+  }
   textRight(g, cfg::kMarginR - 13, y0 + 28, buf);
   g->setFont(F_CN);
   textRight(g, cfg::kMarginR, y0 + 28, "天");
