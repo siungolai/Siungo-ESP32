@@ -159,10 +159,29 @@ constexpr uint32_t kHpmSettleMs = 100;       // 切 HPM 后等画面稳定再写
 // ---- 空闲省电 ----
 // 无按键、无数据变化超过这个时长就切 LPM（0x39），有交互立刻切回 HPM（0x38）。
 constexpr uint32_t kIdleToLpmMs = 30000;  // docs/adr/0005
-// 对比度 5 档，BOOT 长按循环。编码见 RlcdDisplay::setContrast。
+// 对比度 5 档。两条路径改同一个值、写同一份 NVS：面板上 BOOT 长按的热键
+// 与关于页设置版面里的「BOOT 长按 = 切换选中行选项」（docs/adr/0017）。
+// 编码见 RlcdDisplay::setContrast。
 constexpr uint8_t kContrastLevels[] = {40, 50, 60, 70, 80};
 constexpr uint8_t kContrastCount = sizeof(kContrastLevels) / sizeof(kContrastLevels[0]);
+constexpr uint8_t kContrastDefaultIdx = 2;  // 第 3 档 = 60，M0 实测可见变化
 constexpr uint16_t kContrastHintMs = 2000;  // 角落「对比度 3/5」显示时长
+
+// ---- 设置注册表（v0.1.1，docs/adr/0017）----
+// Preferences 的 namespace 名。只放「一项一个 key」的小配置，不放大数据。
+constexpr const char *kSettingsNamespace = "rlcd";
+// 生效钩子：settings.cpp 不认显示层，由 main.cpp 在 setup() 里挂上
+// RlcdDisplay::setContrast。nullptr 时设置模块只改值不生效（自检可跑）。
+// 放在 namespace 外面：函数指针要能在 main.cpp 里被取地址赋值，
+// 而成员钩子会让 settings.cpp 反向依赖显示层。
+// 只声明不定义 —— 定义在 settings.cpp。放定义会撞
+// 「multiple definition of cfg_g_lcd_setContrast」：每个 include config.h 的
+// 翻译单元都会各自拿到一份。
+}  // namespace cfg
+
+extern void (*cfg_g_lcd_setContrast)(uint8_t);
+
+namespace cfg {
 
 // ---- 界面几何（全部来自 docs/策划案.md §4.2 / §4.3 / §4.4 的实测字宽）----
 constexpr int kHeaderH = 24;

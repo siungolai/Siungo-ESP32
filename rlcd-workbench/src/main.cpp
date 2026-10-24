@@ -27,13 +27,15 @@
 #include "tz.h"
 #include "ui.h"
 #include "net_wifi.h"
+#include "settings.h"
 
 namespace {
 
 RlcdDisplay g_lcd(cfg::kLcdSck, cfg::kLcdMosi, cfg::kLcdDc, cfg::kLcdCs, cfg::kLcdRst);
 AppState g_state;
 
-uint8_t g_contrastIdx = 2;  // 默认第 3 档 = 60
+// 对比度档位现在由 settings 注册表持有（v0.1.1，docs/adr/0017），
+// 这里只留热键 toast 的截止时间。
 uint32_t g_contrastHintUntil = 0;
 uint32_t g_bootHintUntil = 0;
 uint32_t g_lastActivityMs = 0;
@@ -642,7 +644,7 @@ void paint() {
     ui::drawToast(g, "预留");
   }
   if (g_contrastHintUntil != 0 && (int32_t)(millis() - g_contrastHintUntil) < 0) {
-    ui::drawContrastHint(g, g_contrastIdx, cfg::kContrastCount);
+    ui::drawContrastHint(g, settings::indexOf(0), cfg::kContrastCount);
   }
   const uint32_t t0 = micros();
   g_lcd.refreshAll();
@@ -661,17 +663,27 @@ void paint() {
 // 空闲计时永远回不到 0，就再也进不了 LPM 了。
 void noteActivity() { g_lastActivityMs = millis(); }
 
+// 对比度改由 settings 注册表持有（v0.1.1，docs/adr/0017）：面板上的 BOOT
+// 长按热键与关于页设置版面里的「切换选中行选项」改的是同一个值、写同一份 NVS。
+// 这里只保留热键路径自己那一份 toast —— 注册表刻意不弹 toast，
+// 因为设置版面里整行反显就是反馈，toast 会把它盖住。
 void cycleContrast() {
-  g_contrastIdx = (g_contrastIdx + 1) % cfg::kContrastCount;
-  g_lcd.setContrast(cfg::kContrastLevels[g_contrastIdx]);
+  const uint8_t idx = settings::indexOf(0);
+  const uint8_t next = (uint8_t)((idx + 1) % cfg::kContrastCount);
+  settings::indexRef(0) = next;
+  g_lcd.setContrast(cfg::kContrastLevels[next]);
+  settings::save(0);  // 变更即写：重启后必须还在这一档
   g_contrastHintUntil = millis() + cfg::kContrastHintMs;
-  logLine("[key] contrast -> level %u/%u (%u)", (unsigned)(g_contrastIdx + 1),
-          (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[g_contrastIdx]);
+  logLine("[key] contrast -> level %u/%u (%u)", (unsigned)(next + 1),
+          (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[next]);
   g_dirty = true;
 }
 
 void goHome() {
+  // 回主页同时关掉关于页与设置版面 —— 设置版面是覆盖层的一部分，
+  // 不该在「回主页」之后还留在屏上（它没有独立的面板位）。
   g_state.about = false;
+  g_state.aboutSettings = false;
   g_state.panel = 0;
   logLine("[key] go home (panel=0, about closed)");
   g_dirty = true;
@@ -685,7 +697,10 @@ void handleKey(Gesture gs) {
   switch (gs) {
     case Gesture::Short:
       if (g_state.about) {
+        // 退出关于页时下半区重置回教程版面（A5 断言 2）：设置版面不记住
+        // 上次停留位置。用户每次进关于页都先看到说明书，再按一次 BOOT 进设置。
         g_state.about = false;
+        g_state.aboutSettings = false;
         logLine("[key] close about");
       } else {
         g_state.panel = (g_state.panel + 1) % 2;
@@ -696,8 +711,16 @@ void handleKey(Gesture gs) {
       goHome();
       break;
     case Gesture::Double:
-      g_state.about = !g_state.about;
-      logLine("[key] about -> %d", (int)g_state.about);
+      // KEY 双击在关于页两版内语义相同（v0.1.1，docs/adr/0017 Q9-c）：
+      // 关于页已开着就回到它的默认视图 —— 教程版面。这是设置版面的
+      // 对称返回，用户不会被困在设置版面里。
+      if (g_state.about && g_state.aboutSettings) {
+        g_state.aboutSettings = false;
+        logLine("[key] settings -> tutorial pane");
+      } else {
+        g_state.about = !g_state.about;
+        logLine("[key] about -> %d", (int)g_state.about);
+      }
       break;
     default:
       break;
@@ -711,20 +734,51 @@ void handleBoot(Gesture gs) {
     return;
   }
   noteActivity();
+  // BOOT 的语义随位置变化（v0.1.1，docs/adr/0017 的手势矩阵）：
+  //   面板上        短按 = 立即拉数据重绘；长按 = 循环对比度热键；双击 = 预留
+  //   关于页教程版面 短按 = 进设置版面；      长按 = 进设置版面；  双击 = 预留
+  //   关于页设置版面 短按 = 选中行下一行；    长按 = 切换选中行选项；双击 = 预留
+  // 教程版面把长按也绑成「进设置版面」是刻意的：旧固件的肌肉记忆是
+  // 「BOOT 长按调对比度」，让它直接进设置版面，等于再长按一次就切到对比度，
+  // 旧习惯两拍内仍然有效。
+  const bool settingsPane = g_state.about && g_state.aboutSettings;
+  const bool aboutPane = g_state.about && !g_state.aboutSettings;
   switch (gs) {
     case Gesture::Short:
-      // 文档里这一格写的是「立即拉数据并重绘」，所以它必须真的去拉 ——
-      // 只置脏的话，改了服务器上的源文件还得等下一个 5 分钟轮询，
-      // 而「按一下就同步」正是 A3 用来验证契约的那一下。
-      logLine("[boot] force refresh: snapshot + todo");
-      snapshot::requestRefresh();
-      todo::requestRefresh();
+      if (settingsPane) {
+        settings::selectNext();
+        logLine("[boot] settings select -> row %u/%u", (unsigned)(settings::selected() + 1),
+                (unsigned)settings::count());
+      } else if (aboutPane) {
+        g_state.aboutSettings = true;
+        logLine("[boot] about -> settings pane");
+      } else {
+        // 文档里这一格写的是「立即拉数据并重绘」，所以它必须真的去拉 ——
+        // 只置脏的话，改了服务器上的源文件还得等下一个 5 分钟轮询，
+        // 而「按一下就同步」正是 A3 用来验证契约的那一下。
+        logLine("[boot] force refresh: snapshot + todo");
+        snapshot::requestRefresh();
+        todo::requestRefresh();
+      }
       g_dirty = true;
       break;
     case Gesture::Long:
-      cycleContrast();
+      if (settingsPane) {
+        // 切换选中行的选项。串口打的是 ASCII 标签 + 档位，不打中文
+        // （策划案 §5 M2：串口日志一律 ASCII）。
+        const uint8_t idx = settings::cycleCurrent();
+        logLine("[boot] settings cycle -> row %u option %u", (unsigned)(settings::selected() + 1),
+                (unsigned)(idx + 1));
+      } else if (aboutPane) {
+        g_state.aboutSettings = true;
+        logLine("[boot] about -> settings pane (long)");
+      } else {
+        cycleContrast();
+      }
+      g_dirty = true;
       break;
     case Gesture::Double:
+      // 「预留」而不是「按了没反应」——ADR-0003 的规矩：六个槽全部有归属。
       g_bootHintUntil = millis() + cfg::kContrastHintMs;
       logLine("[boot] reserved slot, not bound");
       g_dirty = true;
@@ -820,7 +874,7 @@ void printBootReport() {
   Serial.println();
   Serial.println("========================================");
   Serial.printf("project : rlcd-workbench %s (%s)\n", ver::kVersion, ver::kDate);
-  Serial.println("stage   : M4 boot (i2c + shtc3 + battery + wifi + server + todo)");
+  Serial.println("stage   : M5 boot (i2c + shtc3 + battery + wifi + server + todo + settings)");
   Serial.printf("uptime  : %lu s since boot\n", (unsigned long)(millis() / 1000));
   Serial.println("----------------------------------------");
   Serial.printf("reset   : %s\n", resetReasonName(esp_reset_reason()));
@@ -847,9 +901,35 @@ void printBootReport() {
                 timesync::synced() ? "yes" : "no");
   Serial.printf("clock   : %04d-%02d-%02d %02d:%02d:%02d wd=%d\n", g_state.year, g_state.month,
                 g_state.day, g_state.hour, g_state.minute, g_state.second, g_state.weekday);
-  Serial.printf("contrast: level %u/%u (%u)\n", (unsigned)(g_contrastIdx + 1),
-                (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[g_contrastIdx]);
+  // 来源标注是 A5 断言 3/4 的唯一串口证据：这一档到底是 NVS 读回来的、
+  // 还是默认档、还是 NVS 越界回退的。少了 src=，「重启后档位还在吗」
+  // 这个问题在串口上答不了。
+  Serial.printf("contrast: level %u/%u (%u) src=%s\n", (unsigned)(settings::indexOf(0) + 1),
+                (unsigned)cfg::kContrastCount, (unsigned)cfg::kContrastLevels[settings::indexOf(0)],
+                settings::srcNameOf(0));
   Serial.println("========================================");
+}
+
+// 设置读回 + 生效。必须在 g_lcd.begin() 之后调（apply 要能真的设对比度），
+// 在 printBootReport() 之前调（开机报告要打出 src=）。
+//
+// 三态（v0.1.1，docs/adr/0017 Q21）：
+//   无 key（v0.1.0 升级后第一次开机）→ 静默用默认档，不打警告
+//   有 key 但越界                  → 打一行 out of range 并回默认档
+//   合法                           → 直接用
+// 「越界回默认档」而不是「夹到最近合法档」：夹取会静默给出一个用户没选过的值。
+void loadSettingsFromNvs() {
+  cfg_g_lcd_setContrast = [](uint8_t level) { g_lcd.setContrast(level); };
+  settings::loadAll();
+  for (size_t i = 0; i < settings::count(); ++i) {
+    if (settings::srcOf(i) == settings::Src::NvsOutOfRange) {
+      logLine("[settings] %s: nvs value out of range -> default (level %u/%u)",
+              settings::table()[i].nvsKey != nullptr ? settings::table()[i].nvsKey : "?",
+              (unsigned)(settings::indexOf(i) + 1), (unsigned)settings::table()[i].optionCount);
+    }
+  }
+  logLine("[settings] contrast level %u/%u src=%s", (unsigned)(settings::indexOf(0) + 1),
+          (unsigned)cfg::kContrastCount, settings::srcNameOf(0));
 }
 
 }  // namespace
@@ -881,11 +961,20 @@ void setup() {
       delay(1000);
     }
   }
-  g_lcd.setContrast(cfg::kContrastLevels[g_contrastIdx]);
+  // 顺序有讲究：先让对比度落到默认档（免得读 NVS 前那几帧白屏），
+  // 再由 loadSettingsFromNvs() 读回真值并重新 setContrast。
+  // 读回必须在 g_lcd.begin() 之后（apply 要能真的设对比度），
+  // 在 printBootReport() 之前（开机报告要打出 src=）。
+  g_lcd.setContrast(cfg::kContrastLevels[cfg::kContrastDefaultIdx]);
 
   fillFakeData();
   clockSelfTest();
   fontSelfTest();  // 字库已经 init 过，getUTF8Width 从这里开始才可用
+
+  // 设置读回放在这里：lcd.begin() 已过（apply 能生效），自检报告还没开始
+  // 读任何串口注意力。settings::loadAll() 里对越界项打的那一行 out of range
+  // 因此不会被淹没在几十行自检输出里 —— A5 断言 4 就是靠找到这一行。
+  loadSettingsFromNvs();
 
   // ---- M2 第 1+2 步：I2C 总线 + SHTC3 ----
   // 总线先建，扫描一次把整条线上的从设备列出来（这块板上应有 0x18 / 0x40 / 0x51 / 0x70）。
@@ -1116,8 +1205,15 @@ void loop() {
   // 再等 100 ms（见 RlcdDisplay::refreshAll），也就是说进 LPM 之后每秒都得
   // 来回切一次 —— 不但省不到电，还白搭 100 ms 和一次模式切换。
   // 更早的版本没区分这一条，结果开机 30 秒后进 LPM，秒针就此冻住再也不动。
+  //
+  // 设置版面也不进 LPM（v0.1.1，docs/adr/0017 Q11-a）：设置版面开着时，
+  // 按一下 BOOT 的响应是「NVS 写入 + 整行重画」，而 LPM 下这次写入要等
+  // 约 1 秒才真正落到闪存。那一秒里按键像失灵 —— 用户不知道自己做错了
+  // 什么，只会再按几下，于是连续写好几次。
   const bool clockVisible = (!g_state.about && g_state.panel == 0);
-  if (!g_lpm && !clockVisible && (millis() - g_lastActivityMs) > cfg::kIdleToLpmMs) {
+  const bool settingsVisible = g_state.about && g_state.aboutSettings;
+  if (!g_lpm && !clockVisible && !settingsVisible &&
+      (millis() - g_lastActivityMs) > cfg::kIdleToLpmMs) {
     g_lcd.setLpm();
     g_lpm = true;
     logLine("[pwr] idle %u s -> LPM (0x39)", (unsigned)(cfg::kIdleToLpmMs / 1000));

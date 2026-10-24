@@ -6,6 +6,7 @@
 
 #include "ui.h"
 
+#include "settings.h"
 #include "version.h"
 
 #include <cstdio>
@@ -546,23 +547,93 @@ void drawAbout(U8G2 *g, const AppState &s) {
 
   hline(g, 8, y + 2, cfg::kLcdWidth - 16);
   y += 14;
-  const char *kGestures[] = {
-      "KEY  短按  下一页 / 下一面板",
-      "KEY  长按  回主页并清状态",
-      "KEY  双击  关于页（本页）",
-      "BOOT 短按  立即拉数据并重绘",
-      "BOOT 长按  对比度 5 档循环",
-      "BOOT 双击  预留，未绑定",
-  };
-  for (const char *row : kGestures) {
-    text(g, 8, y, row);
-    y += 16;
+
+  // 下半区两版互斥：教程版面 / 设置版面（v0.1.1，docs/adr/0017）。
+  // 设置版面不是第二张覆盖层，只替换这一块 —— 上半的设备信息始终在场，
+  // 所以用户在改设置时也看得见自己改的是哪块板、哪个固件。
+  // 两版共用同一批固定行：上电 1 秒 BOOT 限制与底部「无背光」提示 ——
+  // 它们在设置版面里同样重要，所以画在 drawAbout 尾部而不是任一半区里。
+  if (s.aboutSettings) {
+    drawSettings(g, s);
+  } else {
+    const char *kGestures[] = {
+        "KEY  短按  下一页 / 下一面板",
+        "KEY  长按  回主页并清状态",
+        "KEY  双击  关于页（本页）",
+        "BOOT 短按  教程页 / 设置页",
+        "BOOT 长按  设置页内切换选项",
+        "BOOT 双击  预留，未绑定",
+    };
+    for (const char *row : kGestures) {
+      text(g, 8, y, row);
+      y += 16;
+    }
   }
 
   // 上电 1 秒内按 BOOT 是下载模式，不是我们的手势 —— 这一条写在屏上比写在
   // 文档里有用：见过的人不会以为"按键坏了"。
-  text(g, 8, y + 4, "上电 1 秒内 BOOT 键无效");
-  textCenter(g, cfg::kLcdWidth / 2, 290, "无背光，请放在有光处");
+  text(g, 8, 282, "上电 1 秒内 BOOT 键无效");
+  textCenter(g, cfg::kLcdWidth / 2, 298, "无背光，请放在有光处");
+}
+
+// 设置版面（关于页下半区，docs/adr/0017）。
+//
+// 版面预算（y=160..300）：
+//   160  小标题「设置」
+//   178  设置行 0（选中行整行反显）
+//   196  设置行 1
+//   214  设置行 2
+//   232  设置行 3        ← 上限约 4 行
+//   250  BOOT 短按 选择行
+//   266  BOOT 长按 切换
+//   282  上电 1 秒内 BOOT 键无效（drawAbout 统一画）
+//   298  无背光，请放在有光处（drawAbout 统一画）
+// 超过 4 项时改滚动窗口（固定窗口：选中行滚出可见区才整窗上滚一行），
+// 不要动那两行固定提示 —— 「暗处看不见」与「上电 1 秒 BOOT 无效」都是
+// 「按键/屏幕看起来坏了」的直接答案，比多一行设置值更该留在屏上。
+void drawSettings(U8G2 *g, const AppState &s) {
+  (void)s;
+  g->setFont(F_CN);
+
+  // 小标题。黑条标题仍写「关于这台工作台」—— 上半区还是设备信息，
+  // 写「设置」会撒谎；「我现在在下半区」用一行小标签比改黑条便宜。
+  text(g, 8, 160, "设置");
+
+  const size_t n = settings::count();
+  const int kTop = 178;
+  const int kPitch = 18;
+  const int kRowH = 16;
+  for (size_t i = 0; i < n; ++i) {
+    const int y = kTop + (int)i * kPitch;
+    if (y > 240) {
+      break;  // 版面上限，见上面的预算表
+    }
+    const settings::Item &it = settings::table()[i];
+    char val[24];
+    it.format(settings::indexOf(i), val, sizeof(val));
+    // 行内容 = 标签 + 右对齐的当前值。右对齐让多行值的个位对齐，
+    // 切档时只有数字部分在动，标签不动 —— 1bpp 上跳动越少越不糊。
+    if (i == settings::selected()) {
+      // 选中行整行反显。选它而不是箭头/外框：月历「今天」整格填黑同一套
+      // 视觉语言，而且调对比度时黑块的深浅变化最明显 —— 它正好是
+      // 「反差够不够」的自检尺。
+      g->setDrawColor(INK);
+      fill(g, 4, y - kRowH + 3, cfg::kLcdWidth - 8, kRowH);
+      g->setDrawColor(PAPER);
+      text(g, 8, y, it.label);
+      textRight(g, cfg::kLcdWidth - 8, y, val);
+      g->setDrawColor(INK);
+    } else {
+      text(g, 8, y, it.label);
+      textRight(g, cfg::kLcdWidth - 8, y, val);
+    }
+  }
+
+  // 键位说明必须留在设置版面里：教程版面被替换掉了，而这里恰恰是最需要
+  // 键位说明的地方（ADR-0003：不能出现「按了没反应」）。
+  // 上电 1 秒限制与底部提示由 drawAbout 统一画，这里不重复画。
+  text(g, 8, 250, "BOOT 短按  选择行");
+  text(g, 8, 266, "BOOT 长按  切换");
 }
 
 void drawContrastHint(U8G2 *g, int idx, int total) {

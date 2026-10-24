@@ -37,6 +37,12 @@ enum WifiState : uint8_t {
 struct AppState {
   int panel = 0;   // 0 = 本地，1 = 服务器
   bool about = false;
+  // 关于页下半区显示哪一版（v0.1.1，docs/adr/0017）：
+  //   false = 教程版面（6 行手势表，默认）
+  //   true  = 设置版面（设置项列表，BOOT 短按/长按交互）
+  // 设置版面不是第二张覆盖层 —— 它只替换关于页的下半区，
+  // 上半的设备信息与固件版本始终在场。
+  bool aboutSettings = false;
 
   int year = 2026, month = 10, day = 22;
   int weekday = 4;  // 1 = 周一 … 7 = 周日
@@ -94,8 +100,13 @@ namespace ui {
 // 画一整帧。show_header_time=false 时页首中段留空（面板一时用，见 ADR-0002）。
 void drawFrame(U8G2 *g, const AppState &s, bool showHeaderTime);
 
-// 关于页是覆盖层，不是面板。
+// 关于页是覆盖层，不是面板。下半区画教程版面还是设置版面由 s.aboutSettings
+// 决定（docs/adr/0017）。
 void drawAbout(U8G2 *g, const AppState &s);
+
+// 设置版面（关于页下半区）。选中行整行反显，行内文案由 settings 注册表的
+// format 回调给出（"3/5 (60)"）。设置项数量上限见 drawSettings 里的版面注释。
+void drawSettings(U8G2 *g, const AppState &s);
 
 // BOOT 长按切对比度时，页首角落临时显示「对比度 3/5」。
 void drawContrastHint(U8G2 *g, int idx, int total);
