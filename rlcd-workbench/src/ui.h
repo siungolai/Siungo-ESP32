@@ -51,7 +51,10 @@ struct AppState {
   float tempC = 24.5f;
   float humi = 48.0f;
 
-  int batteryPct = 87;
+  // -1 = 还没有任何一次成功读数（开机头一分钟内可能如此）。
+  // 不能拿 0 当「未知」：屏幕上的 0% 和「不知道」必须长得不一样，
+  // 这和页首「待办—」是同一条规矩。
+  int batteryPct = -1;
   WifiState wifi = WIFI_ON;
 
   int todoTotal = 6;

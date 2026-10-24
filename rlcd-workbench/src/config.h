@@ -76,6 +76,30 @@ constexpr int kBatAdc = 4;
 constexpr float kBatteryDivider = 3.0f;
 constexpr uint32_t kBatteryPollMs = 60000;
 
+// 电压 -> 电量百分比：四点三段折线（v0.1.2 起，见 ADR-0018）。
+//
+// 官方例程在 3.00–4.12 V 之间画一条直线。这条直线在屏幕上会把一次真实放电
+// 画成「先猛掉、中段几乎不动、最后又猛掉」——因为锂电中段电压几乎是平的，
+// 而电量还在掉。折线把这件事倒过来：中段每伏对应更多百分点，底部每伏对应更少。
+//
+// 四个锚点**没有一个是实测的**，全是工程近似。真要做准只有一条路：对本板做
+// 一次完整放电记录（ADR-0018 记了这条路）。锚点少的好处是替换时清楚该换哪几个数。
+constexpr float kSocKnotV[] = {3.00f, 3.60f, 3.90f, 4.12f};
+constexpr int kSocKnotPct[] = {0, 25, 70, 100};
+constexpr int kSocKnotCount = static_cast<int>(sizeof(kSocKnotV) / sizeof(kSocKnotV[0]));
+
+// 显示死区（v0.1.2）：|新读数 - 当前显示值| 达到阈值才更新屏幕上的数字。
+//
+// 阈值按百分比定，不按毫伏定 —— 换成折线之后，同样是 2%：在中段只值约 13 mV
+// （3.90–3.60 V 段，45 个百分点挤在 300 mV 里），到底部却值约 48 mV
+// （3.60–3.00 V 段，25 个百分点摊在 600 mV 上）。按毫伏设阈值，两个区间的
+// 实际效果会差近四倍。
+// 低电量段收紧到 1%：那时候「还能撑多久」比「数字稳不稳」重要，晚一拍才显示
+// 5% 会让人以为还够用，然后设备熄了。
+constexpr int kBatDeadbandPct = 2;
+constexpr int kBatDeadbandLowPct = 1;
+constexpr int kBatDeadbandLowMax = 10;  // 当前显示值 <= 此值时改用低电量死区
+
 // ---- WiFi ----
 // 凭据写在 gitignored 的 src/secrets.h，不在这里。
 constexpr uint32_t kWifiTickMs = 100;              // 状态机轮询间隔

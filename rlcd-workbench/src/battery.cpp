@@ -56,13 +56,28 @@ bool begin() {
 bool ready() { return g_ok; }
 
 int percentFromVolts(float v) {
-  if (v < 3.0f) {
-    return 0;
+  constexpr int last = cfg::kSocKnotCount - 1;
+  // 两端饱和：低于最低锚点一律 0、高于最高锚点一律 100。
+  // 「端点不撒谎」是这条曲线的验收条件之一 —— 0% 和 100% 只该出现在真的
+  // 到了那两头的时候，不能因为表算出来是 -3% 或 104% 才被迫夹。
+  if (v <= cfg::kSocKnotV[0]) {
+    return cfg::kSocKnotPct[0];
   }
-  if (v > 4.12f) {
-    return 100;
+  if (v >= cfg::kSocKnotV[last]) {
+    return cfg::kSocKnotPct[last];
   }
-  return static_cast<int>((v - 3.0f) / 1.12f * 100.0f);
+  for (int i = 1; i <= last; ++i) {
+    if (v <= cfg::kSocKnotV[i]) {
+      const float v0 = cfg::kSocKnotV[i - 1];
+      const float span = cfg::kSocKnotV[i] - v0;
+      const int p0 = cfg::kSocKnotPct[i - 1];
+      const int dp = cfg::kSocKnotPct[i] - p0;
+      const float t = (v - v0) / span;
+      // 截断而不是四舍五入：让「显示值 <= 真实估算值」，宁可少报一点也不多报。
+      return p0 + static_cast<int>(t * static_cast<float>(dp));
+    }
+  }
+  return cfg::kSocKnotPct[last];
 }
 
 bool read(Sample *out) {

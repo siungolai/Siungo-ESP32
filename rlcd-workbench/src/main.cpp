@@ -49,7 +49,8 @@ bool g_lpm = false;
 bool g_dirty = true;
 bool g_logNextPaint = false;
 bool g_sensorOk = false;
-bool g_batteryOk = false;
+// g_batteryOk 已删除（v0.1.2）：它从 lcd 之前就被赋值、全仓没有任何读取点，
+// 而「电量未知」现在由 g_state.batteryPct < 0 表达 —— 两个真相源比没有更糟。
 bool g_dropTestDone = false;
 timesync::Source g_lastTimeSource = timesync::Source::None;
 
@@ -309,18 +310,37 @@ bool readBattery(bool verbose) {
     }
     return false;
   }
-  // 只有百分比真的变了才置脏。
+  // 显示值走死区（v0.1.2）：|新读数 - 当前显示值| 达到阈值才更新。
   //
-  // 电压在几毫伏内晃是常态，而「置脏」在面板二上意味着从 LPM 醒来重画一帧
-  // （refreshAll 会先切 HPM 再等 100 ms），为一次没变过的读数付这个代价不值得。
-  const int prevPct = g_state.batteryPct;
-  g_state.batteryPct = s.pct;
-  g_batteryOk = true;
-  if (prevPct != s.pct) {
-    g_dirty = true;
+  // 比较的是「新读数 vs 当前显示值」，不是「新读数 vs 上一次读数」——
+  // 后者会让缓慢漂移一路累积，最后在某一帧连跳好几格。死区要卡住的是屏幕。
+  //
+  // 阈值按百分比定（config.h）：换折线之后，同样 2% 在中段只值约 13 mV、
+  // 底部值约 48 mV。按毫伏设阈值，两个区间的效果会差近四倍。
+  //
+  // 首次读数（当前显示值 = -1）不进死区直接落值 —— 否则 '--%' 会赖在屏幕上
+  // 直到电压变化跨过阈值，那说不通。
+  const int shown = g_state.batteryPct;
+  const int band = (shown >= 0 && shown <= cfg::kBatDeadbandLowMax) ? cfg::kBatDeadbandLowPct
+                                                                   : cfg::kBatDeadbandPct;
+  int delta = s.pct - shown;
+  if (delta < 0) delta = -delta;
+  const bool update = (shown < 0) || (delta >= band);
+  if (update) {
+    g_state.batteryPct = s.pct;
+    g_dirty = true;  // 只有这一段会改 batteryPct，改了屏幕就一定得重画
   }
+  // 串口永远打**原始估算值**；被死区挡下时再追加屏幕上的实际值。
+  // 没有原始值，以后就查不出是死区阈值设错了还是曲线错了；
+  // 没有 disp，就分不清「屏幕上写的是这个数」和「屏幕上还挂着旧数」。
+  const int disp = update ? s.pct : shown;
   if (verbose) {
-    logLine("[bat] raw=%d pin=%dmV pack=%.3fV -> %d%%", s.raw, s.pinMv, (double)s.packV, s.pct);
+    if (disp == s.pct) {
+      logLine("[bat] raw=%d pin=%dmV pack=%.3fV -> %d%%", s.raw, s.pinMv, (double)s.packV, s.pct);
+    } else {
+      logLine("[bat] raw=%d pin=%dmV pack=%.3fV -> %d%% (disp %d%%)", s.raw, s.pinMv, (double)s.packV,
+              s.pct, disp);
+    }
   }
   return true;
 }
@@ -592,7 +612,9 @@ void fillFakeData() {
   g_state.humi = 48.0f;
   // 温湿度先给一组占位值，shtc3 第一次读数成功就被覆盖。
   // 传感器读不到时屏幕上就是这组数，串口会有 [shtc3] MISSING 或 read failed。
-  g_state.batteryPct = 87;
+  //
+  // 电量不给占位值（v0.1.2）：v0.1.1 及以前这里是 87，于是 ADC 读不到时
+  // 屏幕会真诚地报 87% —— 一个编出来的数。现在留 -1，页首画 "--%"。
   g_state.wifi = WIFI_CONNECTING;
   g_state.todoTotal = 6;
   g_state.todoDone = 0;
@@ -893,8 +915,13 @@ void printBootReport() {
                 (unsigned long)cfg::kI2cClockHz, i2cbus::ready() ? "up" : "DOWN");
   Serial.printf("shtc3   : %s, id=0x%04X\n", shtc3::ready() ? "ready" : "MISSING",
                 (unsigned)shtc3::sensorId());
-  Serial.printf("battery : %s, %d%%\n", battery::ready() ? "ready" : "MISSING",
-                g_state.batteryPct);
+  // 还没有读数时不能报一个百分比：开机报告说的必须是测到的东西。
+  if (g_state.batteryPct < 0) {
+    Serial.printf("battery : %s, no reading yet\n", battery::ready() ? "ready" : "MISSING");
+  } else {
+    Serial.printf("battery : %s, %d%%\n", battery::ready() ? "ready" : "MISSING",
+                  g_state.batteryPct);
+  }
   Serial.printf("wifi    : %s, ssid=%s\n", netwifi::stateName(), netwifi::ssid());
   Serial.printf("time    : source=%s, rtc=%s, synced=%s\n", timesync::sourceName(),
                 timesync::rtcPresent() ? "present" : "MISSING",

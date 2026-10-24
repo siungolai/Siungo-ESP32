@@ -66,8 +66,18 @@ void dashedBox(U8G2 *g, int x, int y, int w, int h) {
 
 // ---- 图标（手绘，u8g2 内置图标字体尺寸不合用）----
 
-// 电池：17x9 外框 + 右侧 2 px 凸点，内部留 1 px 白边
+// 电池：17x9 外框 + 右侧 2 px 凸点，内部留 1 px 白边。
+// pct < 0 = 还没有读数：虚线框、不填内部。
+// 实线框 + 空电池就是「0%」的样子，不能拿来表示「不知道」。
+// 页上表达「还没拿到」本来就有虚线这条语言（chipUnknown 的隔点框、宠物占位的
+// dashedBox），这里复用 dashedBox，不再手写一套点距。
 void battery(U8G2 *g, int x, int y, int pct) {
+  if (pct < 0) {
+    dashedBox(g, x, y, 17, 9);
+    g->drawPixel(x + 17, y + 4);  // 凸点也只剩轮廓
+    g->drawPixel(x + 18, y + 4);
+    return;
+  }
   box(g, x, y, 17, 9);
   fill(g, x + 17, y + 3, 2, 3);
   if (pct < 0) pct = 0;
@@ -161,13 +171,29 @@ void drawHeader(U8G2 *g, const AppState &s, bool showTime) {
     textCenter(g, cfg::kLcdWidth / 2, 22, buf);
   }
 
-  // 右：待办未完成数 + 电池 + WiFi，从右边缘往左排
+  // 右：待办未完成数 + 电量百分比 + 电池 + WiFi，从右边缘往左排
   g->setFont(F_CN);
   int x = cfg::kMarginR;
   wifi(g, x - 13, 8, s.wifi);
   x -= 13 + 6;
   battery(g, x - 19, 8, s.batteryPct);
   x -= 19 + 6;
+
+  // 百分比数字（v0.1.2）。宽度必须用 tw() 实测：wqy12 里数字和 '%' 不等宽，
+  // "--%"（3 字符）与 "100%"（4 字符）差好几个像素，写死 x 会错位。
+  //
+  // 图标和数字不是冗余：「还剩多少」看填充条一眼就有，读数字才需要停一下。
+  // 两者是不同速度档位的信息。
+  if (s.batteryPct < 0) {
+    snprintf(buf, sizeof(buf), "--%%");  // 还不知道，不是 0%
+  } else {
+    int pct = s.batteryPct;
+    if (pct > 100) pct = 100;
+    snprintf(buf, sizeof(buf), "%d%%", pct);
+  }
+  textRight(g, x, 18, buf);
+  x -= tw(g, buf) + 6;
+
   if (!s.todoHasData) {
     // 「还没拿到」不能画成「0 条待办」——那是在断言一件还不知道的事。
     snprintf(buf, sizeof(buf), "待办—");

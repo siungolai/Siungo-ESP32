@@ -5,10 +5,12 @@
 //
 // kDate 是版本发布日的上板日期，**不是**改代码的日子：v0.1.1 的代码
 // 先合、板上验收再上，所以它填的是"实际烧进板子并验收通过的那一天"
-// （当前 = 2026-10-24，A5 七条上板验收通过日）。
+// （v0.1.1 = 2026-10-24，A5 七条上板验收通过日）。
+// v0.1.2 同上：2026-10-24 烧上板、A6 四条通过两条（另两条见 ADR-0018 的
+// 验收表，记作未观测）。
 #pragma once
 
 namespace ver {
-constexpr const char *kVersion = "v0.1.1";
+constexpr const char *kVersion = "v0.1.2";
 constexpr const char *kDate = "2026-10-24";
 }  // namespace ver
