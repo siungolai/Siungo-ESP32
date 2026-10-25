@@ -6,9 +6,11 @@
 
 #include "ui.h"
 
+#include "goose_frames.h"
 #include "settings.h"
 #include "version.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -52,7 +54,8 @@ void vline(U8G2 *g, int x, int y, int h) { g->drawVLine(x, y, h); }
 void box(U8G2 *g, int x, int y, int w, int h) { g->drawFrame(x, y, w, h); }
 void fill(U8G2 *g, int x, int y, int w, int h) { g->drawBox(x, y, w, h); }
 
-// 虚线框（宠物插件占位）
+// 虚线框：「还没拿到」这条语言本身（页首电池未知态在用）。
+// 它曾经也是宠物插件占位框的画法，v0.1.3 起那块地方画真的鹅（ADR-0019）。
 void dashedBox(U8G2 *g, int x, int y, int w, int h) {
   for (int i = 0; i < w; i += 4) {
     g->drawPixel(x + i, y);
@@ -69,8 +72,8 @@ void dashedBox(U8G2 *g, int x, int y, int w, int h) {
 // 电池：17x9 外框 + 右侧 2 px 凸点，内部留 1 px 白边。
 // pct < 0 = 还没有读数：虚线框、不填内部。
 // 实线框 + 空电池就是「0%」的样子，不能拿来表示「不知道」。
-// 页上表达「还没拿到」本来就有虚线这条语言（chipUnknown 的隔点框、宠物占位的
-// dashedBox），这里复用 dashedBox，不再手写一套点距。
+// 页上表达「还没拿到」本来就有虚线这条语言（chipUnknown 的隔点框也是它），
+// 这里复用 dashedBox，不再手写一套点距。
 void battery(U8G2 *g, int x, int y, int pct) {
   if (pct < 0) {
     dashedBox(g, x, y, 17, 9);
@@ -363,6 +366,24 @@ void drawTodos(U8G2 *g, const AppState &s) {
   }
 }
 
+// ---- 宠物（鹅）：逐帧点阵（v0.1.3，docs/adr/0019 决定 2 / 决定 3）----
+//
+// 用户明确要求：每一帧都是手工排的点阵，不用任何几何图元（m00723）。
+// 帧由 .pio/goose_frames.py 手工编辑（40x56，'#'=黑、'o'=挖出白、'.'=背景），
+// 再由 .pio/make_frames_h.py 生成 src/goose_frames.h（u8g2 XBMP 位序）。
+// 帧号由 pet::View::frame 给出，ui 只负责取出来画，不推断「该画哪张」。
+
+void drawGoose(U8G2 *g, int x, int y, int w, int h, const pet::View &v) {
+  (void)w;
+  (void)h;
+  // 40x56 的点阵放在 84x107 区域的中间偏下（左 22 px、顶 30 px），
+  // 让鹅站在区域底部附近，头顶留出活动空间。
+  const unsigned char *bmp =
+      (const unsigned char *)pgm_read_ptr(&goosebmp::kFrames[v.frame]);
+  g->drawXBMP((u8g2_uint_t)(x + 22), (u8g2_uint_t)(y + 30), goosebmp::kW, goosebmp::kH, bmp);
+}
+
+
 void drawLocal(U8G2 *g, const AppState &s) {
   vline(g, cfg::kSplitX, cfg::kContentTop, cfg::kContentBottom - cfg::kContentTop);
   g->setDrawColor(INK);
@@ -378,15 +399,13 @@ void drawLocal(U8G2 *g, const AppState &s) {
   snprintf(buf, sizeof(buf), "%02d", s.second);
   textCenter(g, 100, 138, buf);
 
-  // 宠物插件占位（84x107），只画虚线框
-  dashedBox(g, 4, 159, 84, 107);
-  g->setFont(F_CN);
-  textCenter(g, 4 + 42, 196, "宠物");
-  textCenter(g, 4 + 42, 212, "占位");
+  // 宠物（鹅）：严格 84x107（x 4..87 / y 159..265）。虚线占位框退场
+  // （v0.1.3，docs/adr/0019 决定 1 / 决定 2）。
+  drawGoose(g, 4, 159, 84, 107, s.petView);
 
   // 温湿度右对齐到 196，只有数字和单位，无中文标签
   //
-  // 注意左边那个宠物占位框：它的右边缘在 x=88，温度串一旦超过 104 px 就会压上去。
+  // 注意左边那只鹅（区域 x 4..87）：温度串一旦超过 104 px 就会压到它身上。
   // 上板实测 "24.5°C" 是 103 px（刚好挤进），但 "-12.3°C" 是 125 px —— 冬天或者
   // 把板子放到空调出风口就会撞框。所以先量宽度再选字号，别赌读数永远正数。
   snprintf(buf, sizeof(buf), "%.1f°C", s.tempC);

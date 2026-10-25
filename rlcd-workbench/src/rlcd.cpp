@@ -177,7 +177,6 @@ void RlcdDisplay::fullInit() {
   const uint8_t c2[] = {0x19, 0x19, 0x19, 0x19};
   const uint8_t c4[] = {0x4B, 0x4B, 0x4B, 0x4B};
   const uint8_t d8[] = {0x80, 0xE9};
-  const uint8_t b2[] = {0x02};
   const uint8_t b3[] = {0xE5, 0xF6, 0x05, 0x46, 0x77, 0x77, 0x77, 0x77, 0x76, 0x45};
   const uint8_t b4[] = {0x05, 0x46, 0x77, 0x77, 0x77, 0x77, 0x76, 0x45};
   const uint8_t g_timing[] = {0x32, 0x03, 0x1F};
@@ -201,7 +200,9 @@ void RlcdDisplay::fullInit() {
   cmdData(0xC4, c4, sizeof(c4));
   cmdData(0xC5, c2, sizeof(c2));
   cmdData(0xD8, d8, sizeof(d8));
-  cmdData(0xB2, b2, sizeof(b2));
+  // 0xB2 = 面板自刷新档率。v0.1.3 起由 setPanelHz() 一处说了算
+  // （ADR-0019 决定 7：1 Hz / 8 Hz 两档），初始化仍然从 1 Hz 开场。
+  setPanelHz(1);
   cmdData(0xB3, b3, sizeof(b3));
   cmdData(0xB4, b4, sizeof(b4));
   cmdData(0x62, g_timing, sizeof(g_timing));
@@ -271,6 +272,17 @@ void RlcdDisplay::setHpm() {
 void RlcdDisplay::setLpm() {
   cmd(0x39);
   lpm_ = true;
+}
+
+void RlcdDisplay::setPanelHz(uint8_t hz) {
+  // 0xB2 的两个有效值（ADR-0019 决定 7）：
+  //   0x02 = 1 Hz —— u8g2 官方 ST7305 例程的初始化值，v0.1.2 及以前一直用它
+  //   0x05 = 8 Hz —— 厂商 BSP factory 的值，只在动画窗口里开
+  // 其它值一律按 1 Hz 处理：写一个手册没写明的值等于拿面板做实验，
+  // 而 ADR-0019 已经把「切档代价」列成待测项，不该再多一个未知数。
+  const uint8_t v = (hz >= 8) ? 0x05 : 0x02;
+  cmdData(0xB2, &v, sizeof(v));
+  panel_hz_ = (v == 0x05) ? 8 : 1;
 }
 
 void RlcdDisplay::setContrast(uint8_t level) {

@@ -45,6 +45,15 @@ class RlcdDisplay {
   // 语义未与数据手册核对，M0 用肉眼确认有无可见变化。
   void setContrast(uint8_t level);
 
+  // 面板自刷新档率（0xB2）。这是「帧率」唯一的硬件旋钮（docs/adr/0019 决定 7）：
+  //   1 Hz = 0x02（u8g2 官方例程值，v0.1.2 及以前一直用它）
+  //   8 Hz = 0x05（厂商 BSP factory 值）
+  // 本函数只写寄存器，**不动** HPM/LPM，也不自带等待：切档之后要不要立刻
+  // setHpm()、要不要 delay(kHpmSettleMs)，由调用方决定。切档本身会不会花屏
+  // 是 ADR-0019 的 1 号实测项（未观测），所以这里保持最小动作。
+  void setPanelHz(uint8_t hz);
+  uint8_t panelHz() const { return panel_hz_; }
+
   // ---- 刷新 ----
   void refreshAll();
   // 逻辑像素坐标；内部换算成 tile 坐标，向下取整、向上取整到 tile 边界。
@@ -66,4 +75,5 @@ class RlcdDisplay {
   uint8_t *buf_ = nullptr;
   bool ready_ = false;
   bool lpm_ = false;
+  uint8_t panel_hz_ = 1;  // 0xB2 的当前档位（1 或 8），只用于调用方比对
 };

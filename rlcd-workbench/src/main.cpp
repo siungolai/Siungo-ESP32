@@ -27,6 +27,7 @@
 #include "tz.h"
 #include "ui.h"
 #include "net_wifi.h"
+#include "pet.h"
 #include "settings.h"
 
 namespace {
@@ -47,6 +48,16 @@ uint32_t g_heartbeatMs = 0;   // 60 s 心跳
 uint32_t g_heapMin = 0;        // 启动以来最小可用堆，A4b 看漂移
 bool g_lpm = false;
 bool g_dirty = true;
+
+// ---- 宠物（v0.1.3，docs/adr/0019）----
+// g_packV：电池端电压（V），0 = 还没读到。动画档位用它（决定 9）。
+// 不能拿 g_state.batteryPct 代替 —— 那是「过了显示死区之后的百分比」，
+// 而电压分档要的是原始值：4.05 V 和 3.90 V 可能显示成同一个百分比。
+float g_packV = 0;
+uint32_t g_lastAnimMs = 0;  // 8 Hz 窗口内上一帧的时刻
+uint8_t g_panelHz = 1;      // 0xB2 当前档位，与 g_lcd.panelHz() 对齐
+pet::Mood g_lastPetMood = pet::Mood::Idle;
+bool g_petMoodLogged = false;  // 第一次一定打，之后只在变化时打
 bool g_logNextPaint = false;
 bool g_sensorOk = false;
 // g_batteryOk 已删除（v0.1.2）：它从 lcd 之前就被赋值、全仓没有任何读取点，
@@ -310,6 +321,9 @@ bool readBattery(bool verbose) {
     }
     return false;
   }
+  // 原始电压也留一份：宠物的动画档位按它分（ADR-0019 决定 9），
+  // 而百分比是过了死区的显示值，两者不是一回事。
+  g_packV = s.packV;
   // 显示值走死区（v0.1.2）：|新读数 - 当前显示值| 达到阈值才更新。
   //
   // 比较的是「新读数 vs 当前显示值」，不是「新读数 vs 上一次读数」——
@@ -656,6 +670,10 @@ void paint() {
   if (g == nullptr) {
     return;
   }
+  // 鹅的姿态在这里定格：一帧只取一次时间，ui 拿到的是快照而不是取值函数。
+  // （若让 ui 自己调 pet::sample()，一帧里两次取 millis 跨过秒边界时，
+  //   头和脚会各自站在不同的姿态上。）
+  g_state.petView = pet::sample(millis());
   const bool showHeaderTime = (g_state.panel != 0);  // 面板一隐藏页首时间（ADR-0002）
   if (g_state.about) {
     ui::drawAbout(g, g_state);
@@ -781,6 +799,10 @@ void handleBoot(Gesture gs) {
         logLine("[boot] force refresh: snapshot + todo");
         snapshot::requestRefresh();
         todo::requestRefresh();
+        // 鹅抬头 1.5 s（v0.1.3，docs/adr/0019 决定 10）：这是这次拉取的副产品 ——
+        // 等待时是「我等着」，数据到了是「我看到了」，同一个动作两种含义。
+        // 零新手势、零新状态：不碰 ADR-0011 留给语音/AI 的那个预留槽。
+        pet::seen(millis());
       }
       g_dirty = true;
       break;
@@ -1003,6 +1025,12 @@ void setup() {
   // 因此不会被淹没在几十行自检输出里 —— A5 断言 4 就是靠找到这一行。
   loadSettingsFromNvs();
 
+  // 宠物：读回 bondDays（v0.1.3）。放在设置读回之后、首帧之前 ——
+  // 首帧就该是「第 N 天」的鹅，而不是先画一只没围巾的、下一秒再补上。
+  // 首次开机这里会打 0：真正登记第 1 天在 loop 的第一次 tick（需要可信时间）。
+  pet::begin();
+  logLine("[pet] bond days=%lu", (unsigned long)pet::bondDays());
+
   // ---- M2 第 1+2 步：I2C 总线 + SHTC3 ----
   // 总线先建，扫描一次把整条线上的从设备列出来（这块板上应有 0x18 / 0x40 / 0x51 / 0x70）。
   // 失败也不至于让设备变砖：屏幕不依赖 I2C，最坏情况是温湿度那几个字停在占位值。
@@ -1107,6 +1135,29 @@ void loop() {
     // 只 +1 会让整块表慢慢走慢；delta 用无符号减法，millis 回绕也安全。
     const uint32_t delta = sec - g_lastSecond;
     g_lastSecond = sec;
+
+    // ---- 宠物（v0.1.3，docs/adr/0019）----
+    // 一秒一次。跨天检测在 pet 内部按 60 s 节流；表情优先级也在 pet 里，
+    // 这里只负责把「屏上别处已经存在的状态」翻译成信号（决定 5）。
+    pet::Signals psig;
+    psig.timeReliable = timesync::synced();
+    // 本期只到「待办停更 / 有坏行」这一层，逐条逾期需要解析 due 串（见 pet.cpp 实现注）。
+    psig.todoTrouble = g_state.todoHasData && (g_state.todoStale || g_state.todoBad);
+    psig.serverDown = g_state.serverStale;
+    psig.lowPower = (g_packV > 0.5f && g_packV < 3.9f);
+    psig.openTodos = g_state.todoHasData ? (g_state.todoTotal - g_state.todoDone) : -1;
+    psig.hot = (g_state.tempC >= 30.0f);  // 温湿度只做细节：太热张嘴
+    psig.idleMs = millis() - g_lastActivityMs;
+    pet::tick(psig, millis());
+
+    // 表情变化才打一行（A7 第 2/3 条要靠串口说话，屏上不写字）。
+    const pet::View pv = pet::sample(millis());
+    if (!g_petMoodLogged || pv.mood != g_lastPetMood) {
+      g_petMoodLogged = true;
+      g_lastPetMood = pv.mood;
+      logLine("[pet] mood=%s why=%s bond=%lu d", pet::moodName(pv.mood), pet::whyName(pv.why),
+              (unsigned long)pv.bondDays);
+    }
 
     const int prevMinute = workclock::now().minute;
     workclock::advance(delta);
@@ -1215,6 +1266,32 @@ void loop() {
 
   snapshot::tick();
   if (syncServerToState()) {
+    g_dirty = true;
+  }
+
+  // ---- 动画窗口（v0.1.3，docs/adr/0019 决定 6 / 决定 7）----
+  // 8 Hz 只在这一小段里存在：切档只在跨过档位边界时发生，每帧都写 0xB2
+  // 等于把「窗口」变回常驻写入。窗口外一直是 1 Hz。
+  const uint32_t nowMs = millis();
+  const bool wantBurst = pet::burstActive(nowMs) && !g_state.about && g_state.panel == 0;
+  if (wantBurst && g_panelHz != 8) {
+    g_lcd.setPanelHz(8);
+    // 切档后立刻回 HPM：LPM 下写进显存要等约 1 s 才可见，动画会被吞掉。
+    g_lcd.setHpm();
+    g_panelHz = 8;
+    g_lpm = false;
+    logLine("[pet] anim burst: 0xB2=0x05 (8 Hz)");
+  } else if (!wantBurst && g_panelHz != 1) {
+    g_lcd.setPanelHz(1);
+    g_lcd.setHpm();  // 窗口结束时面板仍是亮的，回 1 Hz 后由既有 30 s 空闲规则决定是否进 LPM
+    g_panelHz = 1;
+    g_lpm = false;
+    logLine("[pet] anim idle: 0xB2=0x02 (1 Hz)");
+  }
+  if (wantBurst && (uint32_t)(millis() - g_lastAnimMs) >= pet::burstStepMs()) {
+    // 8 Hz 的帧节拍。窗口内整帧刷（ADR-0019 决定 8 明确不碰 R1 的 tile 映射，
+    // 因为 8 Hz 低于 §7 第 5 项给局部重绘定的 ≥10 fps 重开线）。
+    g_lastAnimMs = millis();
     g_dirty = true;
   }
 

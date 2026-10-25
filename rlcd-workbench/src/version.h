@@ -8,9 +8,14 @@
 // （v0.1.1 = 2026-10-24，A5 七条上板验收通过日）。
 // v0.1.2 同上：2026-10-24 烧上板、A6 四条通过两条（另两条见 ADR-0018 的
 // 验收表，记作未观测）。
+//
+// v0.1.3（宠物插件的鹅，docs/adr/0019）代码 2026-10-25 完成，**尚未上板**：
+// kVersion 先改，kDate 仍是上一版的上板日 —— 这条线上 kDate 只在 A7 七条
+// 真的在板上过了一遍之后才动。提前填一个「预计上板日」，等于让关于页
+// 替一次还没发生的验收作证。
 #pragma once
 
 namespace ver {
-constexpr const char *kVersion = "v0.1.2";
+constexpr const char *kVersion = "v0.1.3";
 constexpr const char *kDate = "2026-10-24";
 }  // namespace ver

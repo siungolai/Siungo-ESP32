@@ -9,6 +9,7 @@
 #include <U8G2lib.h>
 
 #include "config.h"
+#include "pet.h"
 
 struct TodoItem {
   char text[32];
@@ -96,6 +97,11 @@ struct AppState {
   bool todoHasData = false;
   bool todoStale = false;
   bool todoBad = false;
+
+  // 宠物（鹅）这一帧的姿态（v0.1.3，docs/adr/0019）。状态机在 pet.cpp，
+  // 这里只是一份快照 —— ui 自己不调 pet::sample()：一帧里取两次时间，
+  // 万一跨过 1 秒边界，会画出一只「上半身旧姿态、下半身新姿态」的鹅。
+  pet::View petView;
 };
 
 namespace ui {
