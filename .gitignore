@@ -61,3 +61,7 @@ __pycache__/
 # （C:/Users/EmoBS/.platformio-rlcd，见它的 platformio.ini 的 [platformio] 段），
 # 规则留着是防以后有人把它挪回项目里。装完之后单目录超过 5 GB。
 /rlcd-workbench/.pio-core-rlcd/
+
+# rlcd-workbench 的一次性备份包（tar.gz 里含被上面那条规则挡掉的 docs/，
+# 体积几百 KB，每次备份还多一个文件）。备份只留在本机，不进版本控制。
+/rlcd-workbench/backups/
