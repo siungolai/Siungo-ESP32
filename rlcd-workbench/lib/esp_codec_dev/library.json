@@ -1,0 +1,29 @@
+{
+  "name": "esp_codec_dev",
+  "version": "1.3.4-rlcd",
+  "description": "Espressif esp_codec_dev, locally trimmed for rlcd-workbench. Playback path only (ES8311 + NS4150B); codec_board / ES7210 / TCA9554 removed. See rlcd-workbench/docs/adr/0022 decision 6.",
+  "keywords": "audio, codec, es8311, i2s",
+  "license": "Apache-2.0",
+  "frameworks": "arduino, espidf",
+  "platforms": "espressif32",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": [
+      "+<*.c>",
+      "+<device/es8311/*.c>",
+      "+<platform/audio_codec_ctrl_i2c.c>",
+      "+<platform/audio_codec_data_i2s.c>",
+      "+<platform/audio_codec_gpio.c>",
+      "+<platform/esp_codec_dev_os.c>"
+    ],
+    "includeDir": "include",
+    "flags": [
+      "-I$PROJECT_DIR/lib/esp_codec_dev",
+      "-I$PROJECT_DIR/lib/esp_codec_dev/interface",
+      "-I$PROJECT_DIR/lib/esp_codec_dev/include",
+      "-I$PROJECT_DIR/lib/esp_codec_dev/device/include",
+      "-I$PROJECT_DIR/lib/esp_codec_dev/device/priv_include",
+      "-I$PROJECT_DIR/lib/esp_codec_dev/platform"
+    ]
+  }
+}

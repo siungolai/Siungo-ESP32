@@ -32,6 +32,11 @@ struct State {
 struct Item {
   const char *label;                              // 中文标签（行首）
   uint8_t optionCount;                            // 选项总数
+  // 本项自己的默认档。v0.1.5 之前这里不存在，loadAll() 里写死成
+  // cfg::kContrastDefaultIdx —— 只有一项时那是对的（那一项就是对比度），
+  // 加第二项起就变成「每一项都回对比度的档」。声音三项只有 2 个选项，
+  // 被填成 2 就是越界，开机即触发 out of range（ADR-0022 决策 §2）。
+  uint8_t defaultIndex;
   const char *nvsKey;                             // NVS key；nullptr = 不持久化
   void (*apply)(uint8_t idx);                     // 立即生效
   void (*format)(uint8_t idx, char *buf, size_t cap);  // 行内文案（如 "3/5 (60)"）
@@ -40,9 +45,10 @@ struct Item {
 // 注册表本体。顺序即屏上顺序（首行 = 选中行初始位置）。
 const Item *table();
 size_t count();
+size_t indexOfNvsKey(const char *key);
 
 // ---- 运行期状态 ----
-// 每一项一个槽位，按项索引取。越界时 indexOf 回默认档 —— 调用方
+// 每一项一个槽位，按项索引取。越界时 indexOf 回该项自己的默认档 —— 调用方
 // （main.cpp 的热键路径与 ui.cpp 的绘制）因此不需要自己判越界。
 uint8_t indexOf(size_t i);
 // 可变引用：热键路径「+1 后落盘」需要直接改值，所以开放引用而不是只给 setter。

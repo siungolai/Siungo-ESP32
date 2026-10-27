@@ -48,6 +48,8 @@ bool begin(int sda, int scl) {
 
 bool ready() { return g_bus != nullptr; }
 
+i2c_master_bus_handle_t busHandle() { return g_bus; }
+
 int lastError() { return g_lastError; }
 
 bool addDevice(uint8_t addr, uint32_t hz, i2c_master_dev_handle_t *out) {

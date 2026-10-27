@@ -16,9 +16,20 @@
 //
 // v0.1.4（待办迁到 /api/todo-device，docs/adr/0020）代码 2026-10-27 起改，
 // 尚未上板：kVersion 先改，kDate 不动，等 A8 九条在板上过一遍。
+//
+// v0.1.5（本地提示音与整点报时，docs/adr/0022；五档音量与设置版面滚动，
+// docs/adr/0023）代码 2026-10-27 完成并上板：声音链路打通（ES8311 + NS4150B）、
+// 整点报时判定树、设置版面四项、五档音量与固定窗口滚动全部实测通过。
+// kDate 填 2026-10-27（用户定案）。
+//
+// ⚠️ 这一天**不是 A10 全过日**，别把它读成验收完成标记：第 ② 条（五档听感
+// 区分度）实测不达标，记为遗留问题（ADR-0023 §遗留问题）；第 ⑤ 条（选中行
+// 反显）与 ⑨⑩（跨两个整点、重启后档位保留）未逐条确认。已过的是
+// ①③④⑥⑦⑧ 六条，其中含 20:00 实报与 21:05 的 skipped, quiet hours。
+// 前几版在这条线上都是"验收过了才填"，本版是"用户要求填"，差别记在这里。
 #pragma once
 
 namespace ver {
-constexpr const char *kVersion = "v0.1.4";
-constexpr const char *kDate = "2026-10-24";
+constexpr const char *kVersion = "v0.1.5";
+constexpr const char *kDate = "2026-10-27";
 }  // namespace ver

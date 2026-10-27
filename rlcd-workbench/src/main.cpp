@@ -29,6 +29,7 @@
 #include "net_wifi.h"
 #include "pet.h"
 #include "settings.h"
+#include "sound.h"
 
 namespace {
 
@@ -41,13 +42,24 @@ uint32_t g_contrastHintUntil = 0;
 uint32_t g_bootHintUntil = 0;
 uint32_t g_lastActivityMs = 0;
 uint32_t g_lastSecond = 0;
-uint32_t g_lastSensorMs = 0;
+// 声音（v0.1.5，docs/adr/0022 决策 §4）。
+// g_lastSoundHour：上一秒那一跳观察到的本地小时数。整点判定用它而不是
+// minuteTicked —— 后者的写法是「新分钟 != 旧分钟」，而主循环被堵满 60 分钟
+// 时新旧分钟恰好相等，会整点漏掉。比小时数则堵 3 小时只响一次、堵 61 分钟也响。
+// g_soundHourSeeded：第一秒那份观察值没有「上一跳」可比，先落一次种子，
+// 否则开机那一秒会把当前小时误判成「刚跨过一个整点」。
+int g_lastSoundHour = -1;
+bool g_soundHourSeeded = false;uint32_t g_lastSensorMs = 0;
 uint32_t g_lastBatteryMs = 0;
 uint32_t g_lastWifiMs = 0;
 uint32_t g_heartbeatMs = 0;   // 60 s 心跳
 uint32_t g_heapMin = 0;        // 启动以来最小可用堆，A4b 看漂移
 bool g_lpm = false;
 bool g_dirty = true;
+
+// 前向声明：按键分发（本文件第 846 行附近）在函数体定义之前就要调用它。
+// 只声明不定义在这里，定义在 maybeChime() 旁边 —— 那一块是声音相关的整体。
+void previewSoundSetting();
 
 // ---- 宠物（v0.1.3，docs/adr/0019）----
 // g_packV：电池端电压（V），0 = 还没读到。动画档位用它（决定 9）。
@@ -831,6 +843,10 @@ void handleBoot(Gesture gs) {
         const uint8_t idx = settings::cycleCurrent();
         logLine("[boot] settings cycle -> row %u option %u", (unsigned)(settings::selected() + 1),
                 (unsigned)(idx + 1));
+        // v0.1.5：切到声音三项时试听一声（用户拍板 Q4-A / Q5-A）。
+        // 试听**不受声音总闸约束** —— 它是按键反馈，不是被总开关管辖的
+        // 整点提示音。总开关关着时切这两项却毫无反应，会被当成按键失灵。
+        previewSoundSetting();
       } else if (aboutPane) {
         g_state.aboutSettings = true;
         logLine("[boot] about -> settings pane (long)");
@@ -997,6 +1013,147 @@ void loadSettingsFromNvs() {
   }
   logLine("[settings] contrast level %u/%u src=%s", (unsigned)(settings::indexOf(0) + 1),
           (unsigned)cfg::kContrastCount, settings::srcNameOf(0));
+
+  // 声音三项回读（v0.1.5）。打的是 key=on/off，不是中文 —— 串口一律 ASCII。
+  const size_t si = settings::indexOfNvsKey("sound");
+  const size_t ci = settings::indexOfNvsKey("chime");
+  const size_t qi = settings::indexOfNvsKey("quiet");
+  if (si < settings::count() && ci < settings::count() && qi < settings::count()) {
+    logLine("[settings] sound=%s chime=%s quiet=%s (quiet %02u:00-%02u:00)",
+            cfg_g_sound_master() ? "on" : "off", cfg_g_sound_chime() ? "on" : "off",
+            cfg_g_sound_quiet() ? "on" : "off", (unsigned)cfg::kQuietStartHour,
+            (unsigned)cfg::kQuietEndHour);
+  }
+
+  // 音量档位（v0.1.5 后续，docs/adr/0023）。
+  //
+  // 「volume」是全新的 NVS key，老固件从没写过，所以升级后第一次开机必然
+  // src=Default。默认档 85 恰好等于 v0.1.5 一直在用的那个值 —— 升级不会让
+  // 声音突变。但这件事只写在代码注释里没人看得见，所以在串口打一行：
+  // 用户听到的音量和以为的不一样时，第一反应是「固件把我的设置吃了」，
+  // 这一行就是答案。
+  const size_t vi = settings::indexOfNvsKey("volume");
+  if (vi < settings::count()) {
+    const uint8_t vidx = settings::indexOf(vi);
+    logLine("[settings] volume %u/%u (%u) src=%s", (unsigned)(vidx + 1),
+            (unsigned)cfg::kVolumeCount, (unsigned)cfg::kVolumeLevels[vidx],
+            settings::srcNameOf(vi));
+    if (settings::srcOf(vi) == settings::Src::Default) {
+      logLine("[settings] volume new key, default %u/%u (%u)", (unsigned)(vidx + 1),
+              (unsigned)cfg::kVolumeCount, (unsigned)cfg::kVolumeLevels[vidx]);
+    }
+  }
+}
+
+// ---- 整点报时（v0.1.5，docs/adr/0022 决策 §0）----
+//
+// 判定是一棵决策树，顺序不能调换：
+//   ① 总闸关           -> skipped, master=off      （排最前：否则看不出是谁挡的）
+//   ② 时间不可靠       -> skipped, time unreliable  （排在时段前：不可信的小时数
+//                                                    拿去比静音窗是自欺）
+//   ③ 夜间静音开且落在 21:00-08:00 -> skipped, quiet hours
+//   ④ 播 + [chime] hh:00
+//
+// 第一个判断「是不是刚到整点」用小时数变化，见 g_lastSoundHour 的注释。
+// 时段只在第 ③ 层判，且只读 cfg_g_sound_quiet() 一个开关 ——
+// 这一支里不存在任何小时数常量（ADR-0022：夜间静音是全系统唯一时段判断点）。
+
+// 夜间静音窗判定。窗跨零点（21 -> 08），所以是「或」不是「且」。
+// 边界取左闭右开：「21:00 已经很晚了」进窗，「08:00 该起了」出窗。
+bool isQuietHour(int hour) {
+  const int start = (int)cfg::kQuietStartHour;
+  const int end = (int)cfg::kQuietEndHour;
+  if (start <= end) {
+    return hour >= start && hour < end;
+  }
+  return hour >= start || hour < end;
+}
+
+// ---- 设置版面的声音试听（v0.1.5，docs/adr/0022）----
+//
+// 按 nvsKey 判断「刚刚切的是不是声音三项」，不用硬编码下标：以后往注册表
+// 里插新项时，下标会静默错位，而 key 永远对得上。
+//
+// 三类行为（用户拍板）：
+//   切「声音」总闸   -> 响（无论变成开还是关：这一下在确认按键生效）
+//   切「整点报时」   -> 响
+//   切「夜间静音」   -> 响
+// 一律**不受总闸约束**（Q5-A）。代价写在注释里但代码不额外处理：
+// 总闸关着时切子项仍会出声，这是刻意的 —— 试听是界面反馈，不是提示音。
+//
+// 位置在 maybeChime() 之前：anonymized namespace 里的函数靠前面的定义，
+// 而按键分发（runInput 附近的 switch）在本文件更早处调用它，所以真正
+// 需要的是这一层声明可见 —— 由前面的 isQuietHour/maybeChime 块保证。
+void previewSoundSetting() {
+  const size_t row = settings::selected();
+  if (row >= settings::count()) {
+    return;
+  }
+  const char *key = settings::table()[row].nvsKey;
+  if (key == nullptr) {
+    return;
+  }
+  // 按 nvsKey 匹配而不是按行号：以后往注册表中间插项时，行号会整体挪位，
+  // 硬编码下标的代码会静默地对错行（settings::indexOfNvsKey 就是为这件事加的）。
+  //
+  // volume 也在这张表里（docs/adr/0023）：它是「有值」的那一项，但试听的
+  // 语义和三个开关一样 —— 按一下要让用户听见刚才切到哪一档。
+  // 音量档位在 sound.cpp 的 openStream() 里读，所以这里只要出声，
+  // 出来的自然就是新档位，不需要额外把档位传进去。
+  const bool isSoundRow = strcmp(key, "sound") == 0 || strcmp(key, "chime") == 0 ||
+                          strcmp(key, "quiet") == 0 || strcmp(key, "volume") == 0;
+  if (!isSoundRow) {
+    return;
+  }
+  if (!sound::ready()) {
+    logLine("[snd] preview skipped, not ready (%s)", sound::reason());
+    return;
+  }
+  // 打返回值：playChime() 在 g_busy 或 !g_ready 时直接返回 false 且不出声，
+  // 光打一行 "preview volume" 分不清「响了」还是「被重入保护挡掉了」。
+  const bool said = sound::playChime();
+  logLine("[snd] preview %s say=%d", key, said ? 1 : 0);
+}
+
+void maybeChime() {
+  const tu::DT &t = workclock::now();
+  const int hour = (int)t.hour;
+
+  if (!g_soundHourSeeded) {
+    // 开机/首次进入这一支：只落种子，不判整点。
+    g_soundHourSeeded = true;
+    g_lastSoundHour = hour;
+    return;
+  }
+  if (hour == g_lastSoundHour) {
+    return;  // 没跨小时
+  }
+  g_lastSoundHour = hour;
+
+  // 到这里 = 刚跨过一个整点（小时数变了）。
+  if (!cfg_g_sound_master()) {
+    logLine("[chime] skipped, master=off");
+    return;
+  }
+  if (!timesync::synced()) {
+    logLine("[chime] skipped, time unreliable");
+    return;
+  }
+  if (cfg_g_sound_quiet() && isQuietHour(hour)) {
+    logLine("[chime] skipped, quiet hours");
+    return;
+  }
+  if (!cfg_g_sound_chime()) {
+    // 总闸开、时间可信、不在静音窗，但这一项被单独关掉了。
+    logLine("[chime] skipped, chime=off");
+    return;
+  }
+
+  logLine("[chime] %02d:00", hour);
+  if (!sound::playChime()) {
+    // 不抛错、不重试：串口已经有一行说明，喇叭不响是看得见的事实。
+    logLine("[chime] play failed (%s)", sound::reason());
+  }
 }
 
 }  // namespace
@@ -1109,6 +1266,18 @@ void setup() {
   todo::begin();
   syncTodoToState();  // 首帧就是「还没拿到」，不是先画一拍假数据
 
+  // ---- v0.1.5：声音（docs/adr/0022）----
+  // 必须在 loadSettingsFromNvs() 之后、printBootReport() 之前：
+  //   之后 —— 三个开关的值已经读回来了，begin() 里的自检才知道该不该叫；
+  //   之前 —— 开机报告要能打出 sound 的状态。
+  // 失败是安静的降级（用户第一轮拍板）：屏上不显示「喇叭坏了」这一行，
+  // 串口打一行说明足矣。整点报时那边会看到 !ready() 而直接跳过。
+  if (sound::begin()) {
+    logLine("[snd] ES8311 up (%s)", sound::reason());
+  } else {
+    logLine("[snd] init FAILED (%s) - chime disabled for this boot", sound::reason());
+  }
+
   g_heartbeatMs = millis();
   g_heapMin = ESP.getFreeHeap();
   printBootReport();
@@ -1205,6 +1374,12 @@ void loop() {
         g_dirty = true;
       }
     }
+
+    // ---- 整点报时（v0.1.5，docs/adr/0022 决策 §0）----
+    // 放在秒节拍里、且放在 g_dirty 判定之后：报时是「说得出口的副作用」，
+    // 不该影响重绘节奏。playChime() 会阻塞约 170 ms（含 10 ms 功放建立），
+    // 这一秒的脏标记已经置过，画面不会因此掉一帧。
+    maybeChime();
   }
 
   // 对比度角标 / 预留提示到期后要擦掉

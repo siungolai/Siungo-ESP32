@@ -48,8 +48,20 @@ constexpr uint32_t kI2cClockHz = 400000;
 
 constexpr uint8_t kAddrShtc3 = 0x70;   // 温湿度
 constexpr uint8_t kAddrRtc = 0x51;     // PCF85063 时钟（M2 第 5 步才用）
-constexpr uint8_t kAddrEs8311 = 0x18;  // 音频 codec（本期不用）
-constexpr uint8_t kAddrEs7210 = 0x40;  // 音频 ADC（本期不用）
+constexpr uint8_t kAddrEs8311 = 0x18;  // 音频 codec（v0.1.5 起用于提示音，ADR-0022）
+constexpr uint8_t kAddrEs7210 = 0x40;  // 音频 ADC（仍不用：录音仍延期，ADR-0011）
+
+// ---- I2S 与功放（v0.1.5，docs/adr/0022）----
+// 与 ES8311 同一组 I2S。ES8311 与 ES7210 共用这组脚，本次只用输出方向。
+// 引脚来自官方 board_cfg.txt 的 S3_RLCD_4_2 块，与 HARDWARE.md §11.8 逐项一致。
+constexpr int kI2sMclk = 16;
+constexpr int kI2sBclk = 9;
+constexpr int kI2sWs = 45;
+constexpr int kI2sDin = 10;   // 录音方向，本次不用
+constexpr int kI2sDout = 8;   // 播放方向
+// NS4150B 功放使能。高有效；但**不要自己 toggle** —— esp_codec_dev 的
+// disable_when_closed 默认 true，open/close 时驱动会成对开关它（ADR-0022 事实盘点）。
+constexpr int kPaCtrl = 46;
 
 // ---- SHTC3 温度补偿 ----
 // 官方 BSP 的换算式是 175*raw/65536 - 45 - 4，比数据手册多减 4 °C
@@ -206,6 +218,73 @@ constexpr uint8_t kContrastCount = sizeof(kContrastLevels) / sizeof(kContrastLev
 constexpr uint8_t kContrastDefaultIdx = 2;  // 第 3 档 = 60，M0 实测可见变化
 constexpr uint16_t kContrastHintMs = 2000;  // 角落「对比度 3/5」显示时长
 
+// ---- 声音（v0.1.5，docs/adr/0022）----
+// 本板没有蜂鸣器（README「这块板值得知道的几件事」）。出声只有一条路：
+// ES8311 -> NS4150B（CTRL=GPIO46）-> MX1.25 外接喇叭。
+//
+// 三项设置都是两档，编码统一为 0 = 开、1 = 关。默认全部为「开」——
+// 这是用户 2026-10-27 的决定，代价是一上电就进入「每小时响一声」，
+// 由夜间静音窗兜底，不至于半夜开机就响。
+constexpr uint8_t kSoundCount = 2;
+constexpr uint8_t kSwitchOn = 0;
+constexpr uint8_t kSwitchOff = 1;
+
+// 夜间静音窗：开工时刻与收工时刻（本地小时）。
+// 这是**全系统唯一的时段判断点** —— 整点报时那一项的代码里不存在任何
+// 小时数常量（ADR-0022 决策 §0）。加新的声音类型时自动继承这个窗。
+constexpr uint8_t kQuietStartHour = 21;
+constexpr uint8_t kQuietEndHour = 8;
+
+// 提示音参数。两声「嘀嘀」共 340 ms：150 ms 响 + 40 ms 静 + 150 ms 响。
+// 采样率 16 kHz 与官方 BSP 一致（24 kHz 是小智协议的需求，本次不涉及）。
+//
+// ⚠️ **为什么是 150 ms 而不是 60 ms —— m01063 上板实测的教训**：
+// 原来两声各 60 ms（全长 150 ms），在设置版面里连按五次长按切档，
+// **只有第一声听得见，后四声全哑**。而同样五次 playChime() 放在 setup()
+// 里连播却全响，串口每次都是 say=1（esp_codec_dev_write 返回成功）。
+// 把试听换成 300 ms 长音后连响五次全响 —— 结论是**短音被吃掉了**，不是链路坏。
+//
+// 机理：每次出声都要 open → write → delay → close 一整趟。150 ms 的数据在
+// 16 kHz 双声道 16 bit 下只有 4800 B，而 I2S DMA 缓冲 + kPaSettleMs 建立的
+// 固定开销吃掉了开头一段；写入被排到 close 之后才真正出到功放，
+// 而 close() 会立刻断功放（disable_when_closed）。长音长到覆盖掉固定开销
+// 就听得见，短音就被整段吞没。
+//
+// 150 ms 是权衡结果：够长到稳定出声，又短到不像闹钟。
+constexpr uint32_t kChimeSampleRate = 16000;
+constexpr uint32_t kChimeToneMs = 150;
+constexpr uint32_t kChimeGapMs = 40;
+constexpr uint32_t kChimeFlushMs = 60;    // 关流前等数据放完，见 closeStream()
+constexpr uint16_t kChimeHz = 2700;      // 8 Ω 2 W 喇叭上足够响，且不与语音重叠
+constexpr uint8_t kChimeAmplitude = 60;   // 占满量程的百分比，留余量防削顶
+
+// 输出音量五档（v0.1.5 后续，docs/adr/0023）。
+//
+// 量纲是 esp_codec_dev 的 0..100，内部换算成 ES8311 的 DAC_REG32 档位。
+//
+// **默认档 85 不是随便挑的**：v0.1.5 上板时 85 是唯一被实测证明「听得见」的
+// 值（自检长鸣与整点报时探针都响在它上面）。默认落在这一档，意味着老设备
+// 升级后音量不会莫名变响或变哑；其余四档从它往下排，最上面留 95 让用户能往上试。
+// 小声端只到 40 —— 宁可最小声不够小，也不要「调到最大还是听不清」。
+//
+// 写值时机：**每次 esp_codec_dev_open() 之后都必须写一遍**，这不是可选的。
+// es8311.c:243 的 suspend() 会把 DAC_REG32 清成 0x00（约 -95.5 dB），而
+// esp_codec_dev_open() 每次都先 suspend 再 start、start 不恢复它。
+// 不显式设音量 = 每次开流都是静音，且 write() 依然返回成功。
+constexpr int kVolumeLevels[] = {40, 60, 75, 85, 95};
+constexpr uint8_t kVolumeCount = sizeof(kVolumeLevels) / sizeof(kVolumeLevels[0]);
+constexpr uint8_t kVolumeDefaultIdx = 3;  // = 85，见上
+
+// bringup 自检：非 false 时开机先长鸣 1 秒。
+// 存在理由与 kThermalProbe 相同 —— 声音链路不走官方 codec_board，
+// 拼错 if 层结构的症状是「无声」而不是「报错」，需要一个确定的发声源来证伪。
+//
+// v0.1.5 上板已通过：第一版写这套 codec 配置时「一切正常却不出声」，
+// 根因是自己多加的 mclk_div=256 / no_dac_ref=true 与漏设 hw_gain，
+// 对齐官方 codec_init.c 的字段集后出声。留这个开关方便下次回归。
+constexpr bool kSoundSelfTest = false;
+constexpr uint32_t kSoundSelfTestMs = 1000;
+
 // ---- 设置注册表（v0.1.1，docs/adr/0017）----
 // Preferences 的 namespace 名。只放「一项一个 key」的小配置，不放大数据。
 constexpr const char *kSettingsNamespace = "rlcd";
@@ -219,6 +298,36 @@ constexpr const char *kSettingsNamespace = "rlcd";
 }  // namespace cfg
 
 extern void (*cfg_g_lcd_setContrast)(uint8_t);
+
+// ---- 声音三项的生效钩子（v0.1.5，docs/adr/0022 决策 §4）----
+//
+// 与 cfg_g_lcd_setContrast 同手法、反方向：对比度是「设置层推给显示层」，
+// 声音是「设置层记状态，主循环来取」。三个 setter 只写模块内的静态标志，
+// 不出声；真正的响由 main.cpp 在 loop 里调用 sound::playChime()。
+//
+// 为什么不直接在 apply 里调 sound::playChime()：
+//   settings 这一层刻意不认识显示层，也不该认识音频层（settings.cpp 头注释）。
+//   而且 loadAll() 会逐项 apply —— 上电时叫一声不是用户按的，是固件自己叫的。
+//
+// 定义在 settings.cpp（与 cfg_g_lcd_setContrast 同理，放头文件会 multiple definition）。
+void cfg_g_sound_setMaster(bool on);
+void cfg_g_sound_setChime(bool on);
+void cfg_g_sound_setQuiet(bool on);
+
+// 音量是唯一一个「有值」而不是「开关」的声音项（docs/adr/0023）。
+// 同样只记状态不出声：切档时的试听由 main.cpp 的 previewSoundSetting() 驱动。
+void cfg_g_sound_setVolume(uint8_t idx);
+
+// 供 main.cpp 读取的判定树入参（ADR-0022 决策 §0 的四层判定要用的前三项）。
+// 第四层「到点了」由 main.cpp 自己从 workclock 取。
+bool cfg_g_sound_master();
+bool cfg_g_sound_chime();
+bool cfg_g_sound_quiet();
+
+// 当前音量档位索引（0..kVolumeCount-1）。sound.cpp 每次 open 之后按它取
+// kVolumeLevels[idx] 写进 DAC。越界时 settings 层已回落到默认档，
+// 这里再兜一层，宁可响错响度也不能开流时写一个野值。
+uint8_t cfg_g_sound_volume();
 
 namespace cfg {
 

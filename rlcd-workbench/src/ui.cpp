@@ -691,21 +691,27 @@ void drawAbout(U8G2 *g, const AppState &s) {
   textCenter(g, cfg::kLcdWidth / 2, 298, "无背光，请放在有光处");
 }
 
-// 设置版面（关于页下半区，docs/adr/0017）。
+// 设置版面（关于页下半区，docs/adr/0017；滚动窗口见 docs/adr/0023）。
 //
 // 版面预算（y=160..300）：
-//   160  小标题「设置」
-//   178  设置行 0（选中行整行反显）
-//   196  设置行 1
-//   214  设置行 2
-//   232  设置行 3        ← 上限约 4 行
-//   250  BOOT 短按 选择行
-//   266  BOOT 长按 切换
+//   160  小标题「设置」+ 右侧位置指示「1-4/5」
+//   178  设置行（窗口第 0 行，选中行整行反显）
+//   196  设置行（窗口第 1 行）
+//   214  设置行（窗口第 2 行）
+//   232  设置行（窗口第 3 行）        ← 窗口 4 行，y > 240 截断
+//   250  BOOT 短按  选择行
+//   266  BOOT 长按  切换
 //   282  上电 1 秒内 BOOT 键无效（drawAbout 统一画）
 //   298  无背光，请放在有光处（drawAbout 统一画）
-// 超过 4 项时改滚动窗口（固定窗口：选中行滚出可见区才整窗上滚一行），
-// 不要动那两行固定提示 —— 「暗处看不见」与「上电 1 秒 BOOT 无效」都是
-// 「按键/屏幕看起来坏了」的直接答案，比多一行设置值更该留在屏上。
+//
+// 第 5 项出现后（音量，ADR-0023）用**固定窗口**滚动：窗口永远是 4 行，
+// 只有选中行滚出可见区时才整窗上滚一行。两行固定键位提示不参与滚动 ——
+// 「暗处看不见」与「上电 1 秒 BOOT 无效」都是「按键/屏幕看起来坏了」的直接
+// 答案，比多一行设置值更该留在屏上。
+//
+// 位置指示画在标题行右侧的空白处（y=160 右边约 300 px 没人用），零版面成本。
+// 它显示的**不是选中项**而是窗口覆盖范围：稳态 `1-4/5`、滚一格后 `2-5/5`。
+// 只显示 `3/5` 的话用户看不出还没看到的项在上面还是下面。
 void drawSettings(U8G2 *g, const AppState &s) {
   (void)s;
   g->setFont(F_CN);
@@ -715,11 +721,36 @@ void drawSettings(U8G2 *g, const AppState &s) {
   text(g, 8, 160, "设置");
 
   const size_t n = settings::count();
+  const size_t sel = settings::selected();
   const int kTop = 178;
   const int kPitch = 18;
   const int kRowH = 16;
-  for (size_t i = 0; i < n; ++i) {
-    const int y = kTop + (int)i * kPitch;
+  const size_t kVisible = 4;
+
+  // 固定窗口的起点：保证选中行落在 [first, first+kVisible) 里。
+  // 窗口只在选中行越界时才挪动，且一次只挪一格 —— 这比「窗口居中选中行」
+  // 稳定：居中会让滚到第 3 项时窗口就开始动，屏幕一直在抖。
+  size_t first = 0;
+  if (n > kVisible) {
+    if (sel >= kVisible) {
+      first = sel - kVisible + 1;
+    }
+    // 上面这个式子已经保证 sel < first + kVisible；再兜一次边界。
+    if (first + kVisible > n) {
+      first = n - kVisible;
+    }
+  }
+
+  // 位置指示：窗口覆盖范围。只在窗口真的不满一屏时不画（n <= kVisible）。
+  if (n > kVisible) {
+    char pos[16];
+    snprintf(pos, sizeof(pos), "%u-%u/%u", (unsigned)(first + 1),
+             (unsigned)(first + kVisible), (unsigned)n);
+    textRight(g, cfg::kLcdWidth - 8, 160, pos);
+  }
+
+  for (size_t i = first; i < n && i < first + kVisible; ++i) {
+    const int y = kTop + (int)(i - first) * kPitch;
     if (y > 240) {
       break;  // 版面上限，见上面的预算表
     }
@@ -728,7 +759,7 @@ void drawSettings(U8G2 *g, const AppState &s) {
     it.format(settings::indexOf(i), val, sizeof(val));
     // 行内容 = 标签 + 右对齐的当前值。右对齐让多行值的个位对齐，
     // 切档时只有数字部分在动，标签不动 —— 1bpp 上跳动越少越不糊。
-    if (i == settings::selected()) {
+    if (i == sel) {
       // 选中行整行反显。选它而不是箭头/外框：月历「今天」整格填黑同一套
       // 视觉语言，而且调对比度时黑块的深浅变化最明显 —— 它正好是
       // 「反差够不够」的自检尺。

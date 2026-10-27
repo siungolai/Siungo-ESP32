@@ -31,6 +31,15 @@ int lastError();
 bool addDevice(uint8_t addr, uint32_t hz, i2c_master_dev_handle_t *out);
 void removeDevice(i2c_master_dev_handle_t dev);
 
+// 裸的总线句柄（v0.1.5 新增，docs/adr/0022）。
+// 存在的唯一理由：esp_codec_dev 的官方 audio_codec_ctrl_i2c.c 要的就是这个类型
+// 的句柄，它自己会挂设备、自己发传输。没有访问器的话，声音模块只能另建一条
+// I2C —— 同一组引脚上跑两个 master 实例，故障表现为「偶尔读不到 RTC」。
+//
+// 拿到句柄的调用方**不该**用它绕过 addDevice()/write()/read() 这套封装去做别的事，
+// 只该原样交给要它的第三方库。总线未就绪时返回 nullptr。
+i2c_master_bus_handle_t busHandle();
+
 int write(i2c_master_dev_handle_t dev, const uint8_t *buf, size_t len);
 int read(i2c_master_dev_handle_t dev, uint8_t *buf, size_t len);
 
