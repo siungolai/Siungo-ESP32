@@ -167,14 +167,29 @@ constexpr uint32_t kSnapshotBackoffMaxMs = 120000;
 constexpr uint32_t kHttpTimeoutMs = 8000;
 constexpr uint32_t kHttpResponseMax = 1024;   // 与 status-oled3 一致；超了就是契约坏了
 
-// ---- 待办与行程（M3，ADR-0006）----
-// 5 分钟一次：这份文档只在有人 ssh 上去改源文件时才变，比 CPU 读数冷得多。
-// 停更阈值给到 10 分钟，是为了「错过一轮 cron」不至于立刻在屏上报停更 ——
-// cron 每 5 分钟跑一次，错过一次是 5 分钟，给 2 倍余量正好。
-constexpr const char *kTodoPath = "/status/todo.json";
+// ---- 待办（M8，ADR-0020 取代 ADR-0006）----
+// 数据源换成网站的设备摘要端点：只读、服务端已经把「只取未完成 + 到期窗口
+// [本周一−14 天, 本周日] + 逾期置顶排序 + 上限 6 条」算好，设备只负责画。
+//
+// 5 分钟一次：服务端 SQLite 是单连接（SetMaxOpenConns(1)），30 秒一次只会
+// 排在自己后面；文档的 30 秒是按插电常驻牌写的，这块板用电池。
+// 停更 30 分钟：5 分钟一次的话，错过一轮就报停更等于把「偶尔抖一下」变成
+// 屏上的事故；6 轮才算真停了。
+constexpr const char *kTodoPath = "/api/todo-device";
+constexpr const char *kTodoKeyHeader = "X-Todo-Device-Key";
 constexpr uint32_t kTodoPollMs = 300000;
-constexpr uint32_t kTodoStaleMs = 600000;
-constexpr uint32_t kTodoBackoffMaxMs = 1200000;
+constexpr uint32_t kTodoStaleMs = 1800000;
+// 失败退避 30 s 起、300 s 封顶：失败时反而比正常周期更密，是为了「网络刚恢复
+// 就尽快捞回来」——正常的 5 分钟周期会让恢复晚一个周期。
+constexpr uint32_t kTodoBackoffMinMs = 30000;
+constexpr uint32_t kTodoBackoffMaxMs = 300000;
+// 认证/部署类错误（401/403/404/405）判「人工得管」，但不停止轮询：
+// 服务端把 key 配好、或把端点部署上去之后，设备应该自己恢复，而不是等重烧。
+constexpr uint32_t kTodoSlowProbeMs = 1800000;
+constexpr uint32_t kTodoConnectTimeoutMs = 3000;
+// 2048：最坏响应约 1.27 KB（6 条中文标题 + 行程块），1024 会截断成非法 JSON，
+// 看起来像服务端坏了。与快照的 1024 分家，那条路径的契约没变。
+constexpr uint32_t kTodoResponseMax = 2048;
 
 // ---- 时序 ----
 constexpr uint32_t kBootKeyIgnoreMs = 1000;  // 上电后丢弃 BOOT 事件的窗口

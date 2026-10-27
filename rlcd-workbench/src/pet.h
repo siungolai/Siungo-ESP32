@@ -1,7 +1,7 @@
 // rlcd-workbench / 宠物（鹅）状态机（v0.1.3，docs/adr/0019）
 //
 // 这一层只做三件事，而且三件都是「别人状态的翻译」—— 鹅没有自己的待办：
-//   1. 表情：把「待办异常 / 服务器异常 / 低电 / 久未互动 / idle」翻成一只鹅的姿态
+//   1. 表情：把「逾期 / 待办取数出事 / 服务器异常 / 低电 / 久未互动 / idle」翻成姿态
 //   2. 长期状态：bondDays（本地日历日、只增不减、NVS 一天一写）
 //   3. 动画窗口：idle 1 Hz（蹭主循环每秒那次整帧刷）、事件后 3–5 s 的 8 Hz 窗口
 //
@@ -35,7 +35,8 @@ enum class Mood : uint8_t {
 // 「为什么不高兴」/「这算什么事件」。串口只打 ASCII 名字，屏上不显示。
 enum class Why : uint8_t {
   None = 0,
-  TodoTrouble,
+  TodoTrouble,  // 待办取数出事（停更/坏行）
+  TodoOverdue,  // 真有条目过了期（stats.overdue > 0，v0.1.4）
   ServerDown,
   LowBat,
   IdleLong,
@@ -49,8 +50,12 @@ enum class Why : uint8_t {
 struct Signals {
   // 时间是 RTC/NTP 给的，不是编译期默认值。false 时不动 bondDays。
   bool timeReliable = false;
-  // 待办停更 / 有坏行。逐条「逾期」的判定要解析 due 串，本期不做（见 .cpp）。
+  // 待办停更 / 有坏行。逐条「逾期」的判定改由下面那条通道负责 ——
+  // v0.1.4 起服务端直接下发 stats.overdue，设备不必再解析 due 串。
   bool todoTrouble = false;
+  // 过了期还没做完的条数（stats.overdue）。>0 就是不高兴 ——
+  // 这兑现了 ADR-0019 §5 里「逾期」那一档，也关掉了本文件旧版留的 TODO。
+  int todoOverdue = 0;
   // 服务器快照停更。
   bool serverDown = false;
   // 电池端电压 < 3.9 V（ADR-0019 决定 9）。未知时为 false —— 「不知道电压」

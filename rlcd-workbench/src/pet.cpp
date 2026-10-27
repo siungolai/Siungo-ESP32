@@ -1,12 +1,12 @@
-// rlcd-workbench / 宠物（鹅）状态机实现（v0.1.3，docs/adr/0019）
+// rlcd-workbench / 宠物（鹅）状态机实现（v0.1.4，docs/adr/0019 + 0020）
 //
 // 实现注（两条，都是设计文档里点了名、但实现层必须再确认一次的）：
 //
-// 1. 「逾期」这个信号本期只覆盖到「待办停更 / 有坏行」。真正的逐条逾期要解析
-//    `due` 绝对时间串（todo.h 明确说过它只原样透传、不校验格式），那是待办模块
-//    自己的一次改造，不该打包进「画一只鹅」。所以 Signals.todoTrouble 占的是
-//    ADR-0019 §5 优先级表里的第一格，但它的语义目前是「待办出事了」而不是
-//    「某条待办过期了」—— 串口日志打的是 todo_stale，不要读成 overdue。
+// 1. 「逾期」这个信号在 v0.1.3 只覆盖到「待办停更 / 有坏行」—— 真正的逐条逾期
+//    需要解析 `due` 串，那次被明确推迟了。v0.1.4 换了契约，服务端直接下发
+//    `stats.overdue`（ADR-0020），所以 Signals.todoOverdue 现在是真的逾期条数，
+//    并且排在 todoTrouble 之前。串口日志里 `todo_overdue` 与 `todo_trouble`
+//    是两件事：前者是「你还没做完」，后者是「数据没取好」。
 //
 // 2. 跨天检测只在 60 s 节拍里做，而且**只在时间可信时**做。RTC 掉电后上电会
 //    读到出厂残值（2026-10-23 在 HARDWARE.md 记录过这个情形），拿那种时间算
@@ -187,11 +187,17 @@ void tick(const Signals &s, uint32_t nowMs) {
   }
   g.openTodos = s.openTodos;
 
-  // ---- 主表情：优先级固定为 逾期/待办异常 > 服务器异常 > 低电 > 久未互动 > idle ----
+  // ---- 主表情：优先级固定为 逾期 > 待办异常 > 服务器异常 > 低电 > 久未互动 > idle ----
   // （ADR-0019 §5。冲突时取高者；温湿度只做细节，不参与这里的判断。）
+  // 逾期排在最前面是有意的：它是这屏上唯一「你本人还没做完」的事，
+  // 其余三条都是设备/网络/环境。把「你自己拖延」和「服务器挂了」画成同一张
+  // 脸，等于让两者互相掩护。
   Why why = Why::None;
   Mood mood = Mood::Idle;
-  if (s.todoTrouble) {
+  if (s.todoOverdue > 0) {
+    mood = Mood::Unhappy;
+    why = Why::TodoOverdue;
+  } else if (s.todoTrouble) {
     mood = Mood::Unhappy;
     why = Why::TodoTrouble;
   } else if (s.serverDown) {
@@ -299,6 +305,7 @@ const char *whyName(Why w) {
   switch (w) {
     case Why::None:         return "none";
     case Why::TodoTrouble:  return "todo_trouble";
+    case Why::TodoOverdue:  return "todo_overdue";
     case Why::ServerDown:   return "server_down";
     case Why::LowBat:       return "lowbat";
     case Why::IdleLong:     return "idle_long";

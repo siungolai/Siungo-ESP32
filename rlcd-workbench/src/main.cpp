@@ -521,7 +521,7 @@ void runThermalProbe() {
 
 // 把 todo::Data 投影到 AppState。返回 true 表示真有东西变了，需要重画。
 //
-// 相对到期串（「2h」/「明天」/「逾期」）在这里换算，因为它依赖当前时间，
+// 相对到期串（「逾期6天」/「明天」/「11-05」）在这里换算，因为它依赖当前时间，
 // 而 todo 模块只负责取数、不知道屏幕上的钟走到哪儿。换算结果的比较用
 // strcmp：每分钟最多变一次，不会把面板一从 LPM 里一秒一拽。
 bool syncTodoToState() {
@@ -531,22 +531,30 @@ bool syncTodoToState() {
   const bool hasData = d.valid;
   const bool staleNow = todo::stale();
   if (g_state.todoHasData != hasData || g_state.todoStale != staleNow ||
-      g_state.todoTotal != d.total || g_state.todoDone != d.done) {
+      g_state.todoPending != d.pending || g_state.todoOverdue != d.overdue ||
+      g_state.todoUpgrade != d.upgradeRequired ||
+      g_state.todoKeyRejected != d.keyRejected ||
+      g_state.todoEndpointMissing != d.endpointMissing) {
     g_state.todoHasData = hasData;
     g_state.todoStale = staleNow;
-    g_state.todoTotal = d.total;
-    g_state.todoDone = d.done;
+    g_state.todoPending = d.pending;
+    g_state.todoOverdue = d.overdue;
+    g_state.todoUpgrade = d.upgradeRequired;
+    g_state.todoKeyRejected = d.keyRejected;
+    g_state.todoEndpointMissing = d.endpointMissing;
     changed = true;
   }
 
   // 槽位正文 + 相对到期。到期串格式非法时只清掉这一行的到期，正文照常显示，
   // 并把这一行计进 todoBad —— A3 要求「只跳过这一条、其余五条照常」。
+  // 「今天」优先用服务端下发的 today：设备时钟被时区、SNTP 抖动带偏时，
+  // 用它算出来的天数才是用户看到的那个「今天」（v0.1.4 流程文档铁律二）。
   int badRows = d.badRows;
   for (int i = 0; i < cfg::kTodoSlots; ++i) {
-    char rel[8] = {};
+    char rel[16] = {};
     if (d.due[i][0] != '\0') {
-      if (!todo::relativeDue(d.due[i], g_state.year, g_state.month, g_state.day,
-                             g_state.hour, g_state.minute, rel, sizeof(rel))) {
+      if (!todo::relativeDue(d.due[i], d.today, g_state.year, g_state.month, g_state.day, rel,
+                             sizeof(rel))) {
         ++badRows;
         rel[0] = '\0';
       }
@@ -565,11 +573,12 @@ bool syncTodoToState() {
     logLine("[todo] %d bad row(s) - those rows keep their text but drop the due", badRows);
   }
 
-  // 行程点：daysMonth 是「这份 days 属于哪个月」，月份对不上就一个点都不标。
+  // 行程点：tripsMonth 是「这份 days 属于哪个月」，月份对不上就一个点都不标
+  // （防止 11 月 1 日还按 10 月的 days 在 11 月的格子上点出点来）。
   int monthKey = 0;
-  if (d.daysMonth[0] != '\0') {
+  if (d.tripsMonth[0] != '\0') {
     int y = 0, m = 0;
-    if (sscanf(d.daysMonth, "%d-%d", &y, &m) == 2) {
+    if (sscanf(d.tripsMonth, "%d-%d", &y, &m) == 2) {
       monthKey = y * 100 + m;
     }
   }
@@ -584,18 +593,24 @@ bool syncTodoToState() {
 
   // 页尾那句话也打进串口，理由与 serverFooterNote 相同：视觉断言要有取证手段。
   // 同样是 ASCII 标签而不是屏上那句中文，理由见上面 server 那段。
-  const int undoneNow = (g_state.todoTotal > g_state.todoDone)
-                            ? (g_state.todoTotal - g_state.todoDone)
-                            : 0;
-  const char *tag = !g_state.todoHasData       ? "no-data"
-                    : g_state.todoBad          ? "bad-rows"
-                    : g_state.todoStale        ? "stale"
-                    : (undoneNow > cfg::kTodoSlots) ? "plus-n"
+  // 「+N」的触发条件与 ui.cpp 的 todoNote 必须一致：页首数 > 屏上行数，
+  // 不是 > 6 —— 服务端只给 5 条而 pending=6 时，页尾也要能挂 +1。
+  const bool plusN = g_state.todoPending > d.slots;
+  const char *tag = g_state.todoKeyRejected        ? "key-rejected"
+                    : g_state.todoEndpointMissing  ? "endpoint-missing"
+                    : g_state.todoUpgrade          ? "upgrade"
+                    : !g_state.todoHasData         ? "no-data"
+                    : g_state.todoBad              ? "bad-rows"
+                    : g_state.todoStale            ? "stale"
+                    : plusN                        ? "plus-n"
                                                    : "ok";
-  static char lastTag[16] = {};
-  if (strcmp(tag, lastTag) != 0) {
-    logLine("[ui] footer todo: %s (undone=%d)", tag, undoneNow);
+  static char lastTag[24] = {};
+  static int lastPending = -1;
+  if (strcmp(tag, lastTag) != 0 || g_state.todoPending != lastPending) {
+    logLine("[ui] footer todo: %s (pending=%d rows=%d overdue=%d)", tag,
+            g_state.todoPending, d.slots, g_state.todoOverdue);
     snprintf(lastTag, sizeof(lastTag), "%s", tag);
+    lastPending = g_state.todoPending;
   }
 
   return changed;
@@ -630,11 +645,14 @@ void fillFakeData() {
   // 电量不给占位值（v0.1.2）：v0.1.1 及以前这里是 87，于是 ADC 读不到时
   // 屏幕会真诚地报 87% —— 一个编出来的数。现在留 -1，页首画 "--%"。
   g_state.wifi = WIFI_CONNECTING;
-  g_state.todoTotal = 6;
-  g_state.todoDone = 0;
+  // 自检假数据（v0.1.4）：口径照真契约走 —— 页首是 pending（全量未完成），
+  // 到期串是「逾期N天 / 今天 / 明天 / N天后 / MM-DD」五档，
+  // 行程点是 tripping 的当月天号。这组数只在这块板的 --selftest 分支用。
+  g_state.todoPending = 6;
+  g_state.todoOverdue = 4;
 
   const char *texts[cfg::kTodoSlots] = {"交周报", "买牛奶", "缴水电费", "换滤芯", "取快递", "整理照片"};
-  const char *dues[cfg::kTodoSlots] = {"2h", "明天", "逾期", "3天", "今天", "10-28"};
+  const char *dues[cfg::kTodoSlots] = {"逾期1天", "明天", "逾期3天", "4天后", "今天", "11-05"};
   for (int i = 0; i < cfg::kTodoSlots; ++i) {
     snprintf(g_state.todos[i].text, sizeof(g_state.todos[i].text), "%s", texts[i]);
     snprintf(g_state.todos[i].due, sizeof(g_state.todos[i].due), "%s", dues[i]);
@@ -1141,11 +1159,15 @@ void loop() {
     // 这里只负责把「屏上别处已经存在的状态」翻译成信号（决定 5）。
     pet::Signals psig;
     psig.timeReliable = timesync::synced();
-    // 本期只到「待办停更 / 有坏行」这一层，逐条逾期需要解析 due 串（见 pet.cpp 实现注）。
+    // 待办出事的两条通道（v0.1.4，ADR-0020）：
+    //   抓取层出问题（停更/坏行）→ todoTrouble
+    //   真有条目过了期（stats.overdue）→ todoOverdue，优先级更高
+    // 后者在 v0.1.3 是「本期不做」的 TODO（pet.h:52-53），新契约直接把数发下来了。
     psig.todoTrouble = g_state.todoHasData && (g_state.todoStale || g_state.todoBad);
+    psig.todoOverdue = g_state.todoHasData ? g_state.todoOverdue : 0;
     psig.serverDown = g_state.serverStale;
     psig.lowPower = (g_packV > 0.5f && g_packV < 3.9f);
-    psig.openTodos = g_state.todoHasData ? (g_state.todoTotal - g_state.todoDone) : -1;
+    psig.openTodos = g_state.todoHasData ? g_state.todoPending : -1;
     psig.hot = (g_state.tempC >= 30.0f);  // 温湿度只做细节：太热张嘴
     psig.idleMs = millis() - g_lastActivityMs;
     pet::tick(psig, millis());

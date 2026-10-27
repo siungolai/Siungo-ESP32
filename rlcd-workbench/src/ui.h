@@ -11,8 +11,10 @@
 #include "config.h"
 #include "pet.h"
 
+// 一条待办。text 存的是数据层原文（最多 96 字节），画的时候才按像素裁 ——
+// 裁多宽取决于这一行有没有到期栏，是渲染现场才知道的事（见 drawTodos）。
 struct TodoItem {
-  char text[32];
+  char text[48];
   char due[16];
 };
 
@@ -58,8 +60,12 @@ struct AppState {
   int batteryPct = -1;
   WifiState wifi = WIFI_ON;
 
-  int todoTotal = 6;
-  int todoDone = 0;
+  // 页首那个数（v0.1.4，ADR-0020）。口径变了：不再是「总数 − 已完成」，
+  // 而是 stats.pending —— 全部未完成，含无截止日期、含窗口外。
+  // 那个数可能大于屏上能画的行数，差额由页尾 `+N` 解释（N = pending − 行数）。
+  int todoPending = 6;
+  // 逾期条数（stats.overdue）。只喂给鹅，不上屏 —— 页首那个数已经是全量口径。
+  int todoOverdue = 0;
   TodoItem todos[cfg::kTodoSlots] = {};
 
   int tripMonthKey = 202610;           // yyyymm，用来防「换月瞬间标错月份」
@@ -97,6 +103,11 @@ struct AppState {
   bool todoHasData = false;
   bool todoStale = false;
   bool todoBad = false;
+  // v0.1.4 新增的三种「不是网络问题」的失败。它们各自对应页尾一句话，
+  // 混成一句「待办数据异常」就等于让人去查网络 —— 那是最错的方向。
+  bool todoUpgrade = false;         // schemaVersion 不认识（要升固件）
+  bool todoKeyRejected = false;     // 401：密钥错/缺/服务端没配
+  bool todoEndpointMissing = false; // 404：线上还没部署到这个版本
 
   // 宠物（鹅）这一帧的姿态（v0.1.3，docs/adr/0019）。状态机在 pet.cpp，
   // 这里只是一份快照 —— ui 自己不调 pet::sample()：一帧里取两次时间，

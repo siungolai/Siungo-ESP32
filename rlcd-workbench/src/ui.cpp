@@ -49,6 +49,50 @@ void textRight(U8G2 *g, int xRight, int baseline, const char *s) {
   g->drawUTF8(xRight - tw(g, s), baseline, s);
 }
 
+// 按像素宽裁一行 UTF-8：只画放得下的完整字符，切在字符边界上。
+// 为什么归渲染层管：可用宽度取决于这一行有没有到期栏，而到期栏是
+// 「今天 / 明天 / 逾期6天 / 11-05」，长短不一 —— 数据层算不出这个宽度。
+// 不补省略号（v0.1.4 流程文档 §0 铁律三）：凭空多一个字符会让人以为原文如此。
+void textClipped(U8G2 *g, int x, int baseline, const char *s, int maxW) {
+  if (s == nullptr || s[0] == '\0' || maxW <= 0) return;
+  char acc[64];
+  size_t o = 0;
+  size_t fit = 0;
+  const char *p = s;
+  while (*p != '\0') {
+    const unsigned char c = (unsigned char)*p;
+    int len = 1;
+    if ((c & 0xF8) == 0xF0) {
+      len = 4;
+    } else if ((c & 0xF0) == 0xE0) {
+      len = 3;
+    } else if ((c & 0xE0) == 0xC0) {
+      len = 2;
+    }
+    if (o + (size_t)len + 1 > sizeof(acc)) break;
+    // 数据层是按字节截的，可能在多字节序列中间断开。续字节读到 '\0' 就说明
+    // 这个字符不完整 —— 画半截汉字出来等于凭空造一个不存在的字，宁可不画。
+    bool whole = true;
+    for (int i = 0; i < len; ++i) {
+      if (p[i] == '\0') {
+        whole = false;
+        break;
+      }
+    }
+    if (!whole) break;
+    memcpy(acc + o, p, (size_t)len);
+    o += (size_t)len;
+    acc[o] = '\0';
+    if (tw(g, acc) > maxW) {
+      acc[fit] = '\0';
+      break;
+    }
+    fit = o;
+    p += len;
+  }
+  if (acc[0] != '\0') text(g, x, baseline, acc);
+}
+
 void hline(U8G2 *g, int x, int y, int w) { g->drawHLine(x, y, w); }
 void vline(U8G2 *g, int x, int y, int h) { g->drawVLine(x, y, h); }
 void box(U8G2 *g, int x, int y, int w, int h) { g->drawFrame(x, y, w, h); }
@@ -201,9 +245,9 @@ void drawHeader(U8G2 *g, const AppState &s, bool showTime) {
     // 「还没拿到」不能画成「0 条待办」——那是在断言一件还不知道的事。
     snprintf(buf, sizeof(buf), "待办—");
   } else {
-    int undone = s.todoTotal - s.todoDone;
-    if (undone < 0) undone = 0;
-    snprintf(buf, sizeof(buf), "待办%d", undone);
+    // stats.pending：全部未完成（含无截止日期、含窗口外）。不是「总数−已完成」，
+    // 因为新契约的下发里根本没有「已完成」这个概念（ADR-0020）。
+    snprintf(buf, sizeof(buf), "待办%d", s.todoPending);
   }
   textRight(g, x, 18, buf);
 
@@ -234,8 +278,25 @@ bool footerNote(const AppState &s, char *buf, size_t cap) {
 }
 
 bool todoNote(const AppState &s, char *buf, size_t cap) {
+  // 顺序 = 「越可能是人为配置错，越先说」。网络类的「无数据/停更」放最后：
+  // 它最常见，也最不需要人动手。三种非网络失败各自一句话 —— 混成一句
+  // 「待办数据异常」等于指着一个要去改配置的人说「你网不好」。
+  if (s.todoKeyRejected) {
+    snprintf(buf, cap, "密钥未配置");
+    return true;
+  }
+  if (s.todoEndpointMissing) {
+    snprintf(buf, cap, "端点未部署");
+    return true;
+  }
+  if (s.todoUpgrade) {
+    snprintf(buf, cap, "需升级");
+    return true;
+  }
   if (!s.todoHasData) {
-    snprintf(buf, cap, "无数据");
+    // 「一次都没拿到过」和「拿到了但停更」要分开说：前者是还没开始，
+    // 后者是开始了又断了。流程文档（v0.1.4）点名的也是这两个词。
+    snprintf(buf, cap, "等待数据");
     return true;
   }
   if (s.todoBad) {
@@ -246,11 +307,17 @@ bool todoNote(const AppState &s, char *buf, size_t cap) {
     snprintf(buf, cap, "停更");
     return true;
   }
-  // 屏上只有 6 行。未完成多于 6 条时，页首那个数字会大于眼睛能数到的行数，
-  // 不解释一句就成了 bug。多出来的条数写在这里。
-  const int undone = (s.todoTotal > s.todoDone) ? (s.todoTotal - s.todoDone) : 0;
-  if (undone > cfg::kTodoSlots) {
-    snprintf(buf, cap, "+%d", undone - cfg::kTodoSlots);
+  // 页首是 stats.pending（全量未完成），屏上最多 6 行。差额必须解释：
+  // 「待办12」配 6 行会看起来像丢了 6 条，而那 6 条只是没有截止日期
+  // 或者落在窗口外 —— 它们确实存在，只是排不进这 6 个格子（ADR-0020）。
+  // 口径是「页首数 − 屏上实际行数」，不是「− 6」：服务端少给几条时，
+  // 少掉的那几条同样要能被页尾解释掉（A8 第 ④ 条）。
+  int rows = 0;
+  for (int i = 0; i < cfg::kTodoSlots; ++i) {
+    if (s.todos[i].text[0] != '\0') ++rows;
+  }
+  if (s.todoPending > rows) {
+    snprintf(buf, cap, "+%d", s.todoPending - rows);
     return true;
   }
   return false;
@@ -344,7 +411,7 @@ void drawTodos(U8G2 *g, const AppState &s) {
     text(g, cfg::kCalLeft, cfg::kTodoTop + 11, "—");
     return;
   }
-  if (s.todoTotal == 0) {
+  if (s.todoPending <= 0) {
     text(g, cfg::kCalLeft, cfg::kTodoTop + 11, "无待办");
     return;
   }
@@ -354,15 +421,18 @@ void drawTodos(U8G2 *g, const AppState &s) {
       continue;  // 空槽不占行
     }
     const int y0 = cfg::kTodoTop + i * cfg::kTodoPitch;
-    // 勾选框恒为空：契约里只有「已完成几条」这个总数，没有逐条标记。
-    // 槽位里装的全是未完成条目（服务器按 due 排序、已完成不占槽），
-    // 所以这里画满格等于编造一个设备根本没有的事实。
+    // 勾选框恒为空：新契约不下发逐条完成状态，槽位里装的全是未完成条目，
+    // 画满格等于编造一个设备根本没有的事实（ADR-0020）。
     box(g, cfg::kCalLeft, y0 + 1, 7, 7);
 
-    text(g, cfg::kCalLeft + 12, y0 + 10, s.todos[i].text);
+    // 正文可用宽度现场算：先去把到期栏画在右边，再拿它左边的空隙当边界。
+    int right = cfg::kMarginR;
     if (s.todos[i].due[0] != '\0') {
       textRight(g, cfg::kMarginR, y0 + 10, s.todos[i].due);
+      right = cfg::kMarginR - tw(g, s.todos[i].due) - 4;
     }
+    textClipped(g, cfg::kCalLeft + 12, y0 + 10, s.todos[i].text,
+                right - (cfg::kCalLeft + 12));
   }
 }
 

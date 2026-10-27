@@ -9,13 +9,16 @@
 // v0.1.2 同上：2026-10-24 烧上板、A6 四条通过两条（另两条见 ADR-0018 的
 // 验收表，记作未观测）。
 //
-// v0.1.3（宠物插件的鹅，docs/adr/0019）代码 2026-10-25 完成，**尚未上板**：
-// kVersion 先改，kDate 仍是上一版的上板日 —— 这条线上 kDate 只在 A7 七条
-// 真的在板上过了一遍之后才动。提前填一个「预计上板日」，等于让关于页
-// 替一次还没发生的验收作证。
+// v0.1.3（宠物插件的鹅，docs/adr/0019）代码 2026-10-25 完成、2026-10-25/26
+// 上板跑完 A7 七条中的 1/4/5 条（2/3 只过串口侧，6/7 受设备所限未做）；
+// kDate 仍填 v0.1.2 的上板日 —— 这条线上 kDate 只在整条验收真的过完才动，
+// 不替一次没走完的验收作证。
+//
+// v0.1.4（待办迁到 /api/todo-device，docs/adr/0020）代码 2026-10-27 起改，
+// 尚未上板：kVersion 先改，kDate 不动，等 A8 九条在板上过一遍。
 #pragma once
 
 namespace ver {
-constexpr const char *kVersion = "v0.1.3";
+constexpr const char *kVersion = "v0.1.4";
 constexpr const char *kDate = "2026-10-24";
 }  // namespace ver
